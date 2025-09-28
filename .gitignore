@@ -1,0 +1,31 @@
+﻿# Node / frontend
+rag-studio-ollama/frontend/node_modules/
+rag-studio-ollama/frontend/dist/
+rag-studio-ollama/frontend/tsconfig.tsbuildinfo
+rag-studio-ollama/frontend/vite.config.d.ts
+
+# Python / venv
+**/__pycache__/
+**/*.pyc
+.venv/
+venv/
+
+# RAG data (vector DB and uploads)
+rag-studio-ollama/data/chroma_db/
+rag-studio-ollama/data/uploaded_files/
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+**/.docker/
