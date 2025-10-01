@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { toast } from 'react-hot-toast';  // ← добавьте этот импорт
+import { toast } from 'react-hot-toast';
 import ToastProvider from './components/Toast';
 import Header from './components/Header';
 import UploadZone from './components/UploadZone';
 import DocumentTable from './components/DocumentTable';
 import Chat from './components/Chat';
-import { getHealth, getModels, uploadDocumentWithProgress, askCollectionQuestion, deleteDocument, getDocumentStatus } from './services/api';
+import { getHealth, getModels, uploadDocumentWithProgress, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments } from './services/api';
 import { DocumentStatus, HealthResponse, Collection, ChatMessage } from './types';
 
 function App() {
@@ -32,6 +32,21 @@ function App() {
   const [activeTab, setActiveTab] = useState<'docs' | 'chat'>('docs');
 
   const activeCollection = collections.find(c => c.id === activeCollectionId);
+
+  // Загрузка документов коллекции
+  const loadCollectionDocuments = async (collectionId: string) => {
+    try {
+      const response = await getCollectionDocuments(collectionId);
+      const docs = response.data;
+      setDocuments(prev => {
+        const existingIds = new Set(prev.map(d => d.id));
+        const newDocs = docs.filter((doc: any) => !existingIds.has(doc.id));
+        return [...prev, ...newDocs];
+      });
+    } catch (error) {
+      console.error('Ошибка загрузки документов коллекции:', error);
+    }
+  };
 
   // Инициализация
   useEffect(() => {
@@ -62,7 +77,10 @@ function App() {
       if (raw) {
         const parsed: Collection[] = JSON.parse(raw);
         setCollections(parsed);
-        if (parsed.length > 0) setActiveCollectionId(parsed[0].id);
+        if (parsed.length > 0) {
+          setActiveCollectionId(parsed[0].id);
+          loadCollectionDocuments(parsed[0].id);
+        }
       }
     } catch (error) {
       toast.error('Ошибка загрузки коллекций');
@@ -87,16 +105,7 @@ function App() {
         return;
       }
       const cid = crypto.randomUUID();
-      const newCollection: Collection = { 
-        id: cid, 
-        name, 
-        docIds: [], 
-        chatHistory: [], 
-        createdAt: Date.now() 
-      };
-      setCollections(prev => [...prev, newCollection]);
-      setActiveCollectionId(cid);
-      toast.success(`Коллекция "${name}" создана`);
+      await handleCreateCollection(cid, name);
     }
 
     for (const file of files) {
@@ -110,20 +119,31 @@ function App() {
         }]);
 
         let lastProgress = 0;
-        const res = await uploadDocumentWithProgress(file, (p) => {
-          if (p !== lastProgress) {
-            lastProgress = p;
-            setDocuments(prev => prev.map(d => 
-              d.id === tempId ? { ...d, progress: p } : d
-            ));
-          }
-        });
+        const res = await uploadDocumentWithProgress(
+          file, 
+          (p) => {
+            if (p !== lastProgress) {
+              lastProgress = p;
+              setDocuments(prev => prev.map(d => 
+                d.id === tempId ? { ...d, progress: p } : d
+              ));
+            }
+          },
+          activeCollectionId || 'default' // 🔥 ПЕРЕДАЕМ COLLECTION_ID
+        );
 
         const { document_id } = res.data;
+        
+        // Заменяем временный ID на настоящий
         setDocuments(prev => prev.map(d => 
-          d.id === tempId ? { id: document_id, filename: file.name, status: 'processing' } : d
+          d.id === tempId ? { 
+            id: document_id, 
+            filename: file.name, 
+            status: 'processing' 
+          } : d
         ));
 
+        // Обновляем коллекцию
         setCollections(prev => prev.map(c => 
           c.id === activeCollectionId 
             ? { ...c, docIds: [...c.docIds, document_id] } 
@@ -131,6 +151,14 @@ function App() {
         ));
 
         toast.success(`Файл "${file.name}" загружен`);
+        
+        // Обновляем документы через 2 секунды
+        setTimeout(() => {
+          if (activeCollectionId) {
+            loadCollectionDocuments(activeCollectionId);
+          }
+        }, 2000);
+
       } catch (err) {
         toast.error(`Ошибка загрузки файла: ${file.name}`);
         setDocuments(prev => prev.filter(d => !d.id.startsWith('temp-')));
@@ -138,7 +166,14 @@ function App() {
     }
   };
 
-// Отправка сообщения в чат
+  // Загрузка документов при смене коллекции
+  useEffect(() => {
+    if (activeCollectionId) {
+      loadCollectionDocuments(activeCollectionId);
+    }
+  }, [activeCollectionId]);
+
+  // Отправка сообщения в чат
   const handleSendMessage = async (message: string) => {
     if (!activeCollection || !selectedModel || !activeCollectionId) {
       toast.error('Выберите коллекцию и модель для чата');
@@ -164,7 +199,7 @@ function App() {
     try {
       const res = await askCollectionQuestion({
         question: message,
-        collection_id: activeCollectionId, // теперь activeCollectionId гарантированно string
+        collection_id: activeCollectionId,
         model: selectedModel,
         temperature: 0.3,
         max_tokens: 1000
@@ -274,23 +309,30 @@ function App() {
   };
 
   // Управление коллекциями
-  const handleCreateCollection = () => {
-    const name = window.prompt('Название новой коллекции:');
-    if (!name) {
+  const handleCreateCollection = async (id?: string, name?: string) => {
+    const collectionName = name || window.prompt('Название новой коллекции:');
+    if (!collectionName) {
       toast.error('Название коллекции обязательно');
       return;
     }
-    const id = crypto.randomUUID();
-    const newCollection: Collection = { 
-      id, 
-      name, 
-      docIds: [], 
-      chatHistory: [], 
-      createdAt: Date.now() 
-    };
-    setCollections(prev => [...prev, newCollection]);
-    setActiveCollectionId(id);
-    toast.success(`Коллекция "${name}" создана`);
+    const collectionId = id || crypto.randomUUID();
+    
+    try {
+      await createCollection({ id: collectionId, name: collectionName });
+      
+      const newCollection: Collection = { 
+        id: collectionId, 
+        name: collectionName, 
+        docIds: [], 
+        chatHistory: [], 
+        createdAt: Date.now() 
+      };
+      setCollections(prev => [...prev, newCollection]);
+      setActiveCollectionId(collectionId);
+      toast.success(`Коллекция "${collectionName}" создана`);
+    } catch (error) {
+      toast.error('Ошибка создания коллекции');
+    }
   };
 
   const handleRenameCollection = (collectionId: string, newName: string) => {
@@ -346,7 +388,7 @@ function App() {
             
             return {
               id: doc.id,
-              filename: doc.filename, // используем оригинальное имя из состояния
+              filename: doc.filename,
               status: s.status,
               chunks_count: s.chunks_count,
               error: s.error,
@@ -377,7 +419,7 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-50">
       <Header />
-      <ToastProvider  />
+      <ToastProvider />
 
       <main className="max-w-7xl mx-auto px-4 py-6">
         {/* Статус и настройки */}
@@ -430,7 +472,7 @@ function App() {
               </div>
 
               <button
-                onClick={handleCreateCollection}
+                onClick={() => handleCreateCollection()}
                 className="px-4 py-1 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
               >
                 Новая

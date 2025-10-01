@@ -1,12 +1,13 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import os
 import uuid
 import asyncio
 from typing import List, Optional
+from datetime import datetime
 
+# Импорты из ваших модулей RAG
 from rag_core.database import VectorDatabase
 from rag_core.embeddings import EmbeddingModel
 from rag_core.chunking import DocumentChunker
@@ -26,60 +27,96 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🔥 Middleware для увеличения таймаутов
-@app.middleware("http")
-async def timeout_middleware(request, call_next):
-    try:
-        # Увеличиваем таймаут для запросов /ask до 6 минут
-        if request.url.path == "/ask":
-            return await asyncio.wait_for(call_next(request), timeout=360.0)
-        else:
-            return await asyncio.wait_for(call_next(request), timeout=60.0)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Request timeout")
-
 # Инициализация компонентов RAG
-embedding_model = EmbeddingModel()
-vector_db = VectorDatabase(embedding_model)
-document_chunker = DocumentChunker()
-rag_chain = RAGChain()
+try:
+    embedding_model = EmbeddingModel()
+    vector_db = VectorDatabase(embedding_model)
+    document_chunker = DocumentChunker()
+    rag_chain = RAGChain()
+    print("✅ RAG компоненты инициализированы")
+except Exception as e:
+    print(f"❌ Ошибка инициализации RAG компонентов: {e}")
+    embedding_model = None
+    vector_db = None
+    document_chunker = None
+    rag_chain = None
 
 # Модели запросов/ответов
-class DocumentUploadResponse(BaseModel):
-    document_id: str
-    filename: str
-    status: str
-    message: str
-
-class QuestionRequest(BaseModel):
-    question: str
-    document_id: str
-    temperature: Optional[float] = 0.3
-    max_tokens: Optional[int] = 1000
-
-class QuestionResponse(BaseModel):
-    answer: str
-    sources: List[str]
-    document_id: str
-    processing_time: float
-
 class HealthResponse(BaseModel):
     status: str
     ollama_status: str
     models_available: List[str]
 
-# Глобальное хранилище состояния документов (в продакшене заменить на БД)
+class DocumentStatus(BaseModel):
+    id: str
+    filename: str
+    status: str
+    chunks_count: Optional[int] = None
+    error: Optional[str] = None
+
+class UploadResponse(BaseModel):
+    document_id: str
+    filename: str
+    status: str
+
+class AskQuestionRequest(BaseModel):
+    question: str
+    model: str
+    temperature: Optional[float] = 0.3
+    max_tokens: Optional[int] = 1000
+
+class CollectionCreateRequest(BaseModel):
+    id: str
+    name: str
+
+# Глобальное хранилище
 document_store = {}
+collections_store = {}
 
-@app.get("/")
-async def root():
-    return {"message": "RAG Studio API работает 🚀"}
+def get_collection_documents(collection_id: str) -> List[str]:
+    return collections_store.get(collection_id, {}).get("docIds", [])
 
-@app.get("/health", response_model=HealthResponse)
+def add_document_to_collection(collection_id: str, document_id: str):
+    if collection_id not in collections_store:
+        collections_store[collection_id] = {
+            "id": collection_id,
+            "name": f"Collection {collection_id[:8]}",
+            "docIds": [document_id],
+            "chatHistory": [],
+            "createdAt": datetime.now().isoformat()
+        }
+    else:
+        if document_id not in collections_store[collection_id]["docIds"]:
+            collections_store[collection_id]["docIds"].append(document_id)
+
+def init_default_collection():
+    default_collection_id = "default"
+    if default_collection_id not in collections_store:
+        collections_store[default_collection_id] = {
+            "id": default_collection_id,
+            "name": "Default Collection",
+            "docIds": [],
+            "chatHistory": [],
+            "createdAt": datetime.now().isoformat()
+        }
+
+@app.on_event("startup")
+async def startup_event():
+    init_default_collection()
+    print("✅ Дефолтная коллекция инициализирована")
+
+# 🔥 API ЭНДПОИНТЫ
+
+@app.get("/api/health")
 async def health_check():
-    """Проверка статуса сервиса и подключения к Ollama"""
     try:
-        # Проверка доступности Ollama
+        if rag_chain is None:
+            return HealthResponse(
+                status="degraded",
+                ollama_status="error: RAG components not initialized",
+                models_available=[]
+            )
+        
         ollama_status = await rag_chain.check_ollama_health()
         models = await rag_chain.get_available_models()
         
@@ -90,22 +127,32 @@ async def health_check():
         )
     except Exception as e:
         return HealthResponse(
-            status="degraded",
+            status="degraded", 
             ollama_status=f"error: {str(e)}",
             models_available=[]
         )
 
-@app.post("/upload", response_model=DocumentUploadResponse)
-async def upload_document(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
-):
-    """Загрузка и индексация документа"""
+@app.get("/api/models")
+async def get_models():
     try:
-        # Генерация уникального ID для документа
-        document_id = str(uuid.uuid4())
+        if rag_chain is None:
+            return {"models": ["llama3:8b"]}
+        models = await rag_chain.get_available_models()
+        return {"models": models}
+    except Exception as e:
+        return {"models": ["llama3:8b"]}
+
+@app.post("/api/upload")
+async def upload_document(
+    background_tasks: BackgroundTasks, 
+    file: UploadFile = File(...),
+    collection_id: str = Form("default")  # 🔥 Получаем collection_id из формы
+):
+    try:
+        if rag_chain is None:
+            raise HTTPException(status_code=500, detail="RAG components not initialized")
         
-        # Сохранение файла
+        document_id = str(uuid.uuid4())
         upload_dir = "data/uploaded_files"
         os.makedirs(upload_dir, exist_ok=True)
         file_path = f"{upload_dir}/{document_id}_{file.filename}"
@@ -114,228 +161,218 @@ async def upload_document(
             content = await file.read()
             f.write(content)
         
-        # Добавление задачи на обработку в фоне
-        background_tasks.add_task(
-            process_document_background,
-            file_path,
-            document_id,
-            file.filename
-        )
+        print(f"📥 Загружен файл: {file.filename} -> ID: {document_id}")
+        print(f"🎯 Коллекция для загрузки: {collection_id}")
         
-        # Сохранение метаданных документа
         document_store[document_id] = {
+            "id": document_id,
             "filename": file.filename,
-            "file_path": file_path,
             "status": "processing",
-            "size": len(content)
+            "file_path": file_path
         }
         
-        return DocumentUploadResponse(
+        # 🔥 ИСПОЛЬЗУЕМ ПЕРЕДАННУЮ КОЛЛЕКЦИЮ
+        add_document_to_collection(collection_id, document_id)
+        print(f"✅ Документ добавлен в коллекцию '{collection_id}'")
+        print(f"📊 Коллекция '{collection_id}' теперь содержит: {len(get_collection_documents(collection_id))} документов")
+        
+        background_tasks.add_task(process_document_background, file_path, document_id, file.filename)
+        
+        return UploadResponse(
             document_id=document_id,
             filename=file.filename,
-            status="processing",
-            message="Документ принят в обработку"
+            status="processing"
         )
     
     except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Ошибка загрузки файла: {str(e)}"
-        )
+        print(f"❌ Ошибка загрузки: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка загрузки файла: {str(e)}")
 
 async def process_document_background(file_path: str, document_id: str, filename: str):
-    """Фоновая обработка документа"""
     try:
-        # Обновление статуса
-        document_store[document_id]["status"] = "processing"
-        
-        # Чанкинг документа
+        if document_chunker is None or vector_db is None:
+            document_store[document_id].update({"status": "error", "error": "RAG components not available"})
+            return
+            
         chunks = document_chunker.chunk_document(file_path)
-        
-        # Индексация в векторной БД
         await vector_db.index_document(chunks, document_id, filename)
         
-        # Обновление статуса на завершено
-        document_store[document_id]["status"] = "processed"
-        document_store[document_id]["chunks_count"] = len(chunks)
+        document_store[document_id].update({
+            "status": "processed",
+            "chunks_count": len(chunks)
+        })
         
-        print(f"✅ Документ {filename} успешно обработан, чанков: {len(chunks)}")
+        print(f"✅ Документ {filename} обработан, чанков: {len(chunks)}")
         
     except Exception as e:
-        document_store[document_id]["status"] = "error"
-        document_store[document_id]["error"] = str(e)
-        print(f"❌ Ошибка обработки документа {filename}: {str(e)}")
+        document_store[document_id].update({"status": "error", "error": str(e)})
+        print(f"❌ Ошибка обработки {filename}: {str(e)}")
 
-@app.get("/documents/{document_id}/status")
+@app.get("/api/documents/{document_id}/status")
 async def get_document_status(document_id: str):
-    """Получение статуса обработки документа"""
+    if document_id.startswith('temp-'):
+        return {
+            "id": document_id,
+            "filename": "processing...", 
+            "status": "processing",
+            "chunks_count": None,
+            "error": None
+        }
+    
     if document_id not in document_store:
         raise HTTPException(status_code=404, detail="Документ не найден")
     
-    return document_store[document_id]
+    doc = document_store[document_id]
+    return {
+        "id": doc["id"],
+        "filename": doc["filename"],
+        "status": doc["status"],
+        "chunks_count": doc.get("chunks_count"),
+        "error": doc.get("error")
+    }
 
-@app.post("/ask", response_model=QuestionResponse)
-async def ask_question(request: QuestionRequest):
-    """Задать вопрос по документу с увеличенным таймаутом"""
-    import time
-    start_time = time.time()
-    
+@app.post("/api/collections/{collection_id}/ask")
+async def ask_collection_question(collection_id: str, request: AskQuestionRequest):
     try:
-        # Проверка существования документа
-        if request.document_id not in document_store:
-            raise HTTPException(status_code=404, detail="Документ не найден")
+        if rag_chain is None or vector_db is None:
+            raise HTTPException(status_code=500, detail="RAG components not initialized")
         
-        # Проверка статуса документа
-        doc_status = document_store[request.document_id].get("status")
-        if doc_status != "processed":
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Документ еще обрабатывается. Статус: {doc_status}"
-            )
+        collection_docs = get_collection_documents(collection_id)
+        if not collection_docs:
+            raise HTTPException(status_code=400, detail="В коллекции нет документов")
         
-        print(f"🔍 Поиск релевантных чанков для вопроса: {request.question}")
+        all_relevant_chunks = []
         
-        # Поиск релевантных чанков (ограничиваем количество для ускорения)
-        relevant_chunks = await vector_db.search(
-            request.question, 
-            request.document_id, 
-            n_results=3  # 🔥 Уменьшаем для ускорения
+        for document_id in collection_docs:
+            if document_id in document_store and document_store[document_id].get("status") == "processed":
+                try:
+                    chunks = await vector_db.search(request.question, document_id, n_results=2)
+                    all_relevant_chunks.extend(chunks)
+                except Exception as e:
+                    print(f"⚠️ Ошибка поиска в документе {document_id}: {e}")
+                    continue
+        
+        if not all_relevant_chunks:
+            return {
+                "answer": "Не найдено релевантной информации в документах коллекции для ответа на вопрос.",
+                "sources": []
+            }
+        
+        all_relevant_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
+        top_chunks = all_relevant_chunks[:5]
+        
+        answer = await rag_chain.generate_answer(
+            question=request.question,
+            context_chunks=top_chunks,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            model=request.model
         )
         
-        if not relevant_chunks:
-            return QuestionResponse(
-                answer="Не найдено релевантной информации в документе для ответа на вопрос.",
-                sources=[],
-                document_id=request.document_id,
-                processing_time=time.time() - start_time
-            )
-        
-        print(f"📊 Найдено релевантных чанков: {len(relevant_chunks)}")
-        
-        # 🔥 Генерация ответа с увеличенным таймаутом
-        answer = await asyncio.wait_for(
-            rag_chain.generate_answer(
-                question=request.question,
-                context_chunks=relevant_chunks,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens
-            ),
-            timeout=300.0  # 🔥 5 минут на генерацию вместо стандартных 60 сек
-        )
-        
-        # Обработка источников
         sources = list(set([
-            chunk["metadata"].get("source", "Документ")
-            for chunk in relevant_chunks
-            if isinstance(chunk, dict) and "metadata" in chunk
+            chunk.get("metadata", {}).get("source", "Документ")
+            for chunk in top_chunks
         ]))
         
-        processing_time = time.time() - start_time
-        print(f"⏱️ Общее время обработки: {processing_time:.2f} секунд")
-        
-        return QuestionResponse(
-            answer=answer,
-            sources=sources,
-            document_id=request.document_id,
-            processing_time=processing_time
-        )
+        return {"answer": answer, "sources": sources}
     
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504, 
-            detail="Генерация ответа заняла более 5 минут. Попробуйте уменьшить объем документа или использовать другую модель."
-        )
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Ошибка при обработке вопроса: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Ошибка при обработке вопроса: {str(e)}")
 
-@app.get("/models")
-async def get_available_models():
-    """Получение списка доступных моделей Ollama"""
-    try:
-        models = await rag_chain.get_available_models()
-        return {"models": models}
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Ошибка получения списка моделей: {str(e)}"
-        )
-
-# 🔥 Новый endpoint для тестирования скорости модели
-@app.post("/test-model")
-async def test_model_speed():
-    """Тестирование скорости ответа модели"""
-    import time
-    start_time = time.time()
-    
-    try:
-        # Простой тестовый запрос
-        test_chunks = [{"text": "Тестовый текст для проверки скорости работы модели.", "metadata": {"source": "test"}}]
-        
-        answer = await asyncio.wait_for(
-            rag_chain.generate_answer(
-                question="Ответь одним словом: 'работает'",
-                context_chunks=test_chunks,
-                max_tokens=10
-            ),
-            timeout=30.0
-        )
-        
-        response_time = time.time() - start_time
-        
-        return {
-            "status": "success",
-            "response_time": f"{response_time:.2f} секунд",
-            "answer": answer,
-            "model": rag_chain.default_model
-        }
-        
-    except asyncio.TimeoutError:
-        return {
-            "status": "timeout", 
-            "message": "Модель не ответила за 30 секунд",
-            "response_time": ">30 секунд"
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.delete("/documents/{document_id}")
+@app.delete("/api/documents/{document_id}")
 async def delete_document(document_id: str):
-    """Удаление документа и его индекса"""
     try:
+        # 🔥 ОБРАБОТКА ВРЕМЕННЫХ ID
+        if document_id.startswith('temp-'):
+            return {"message": "Временный документ удален"}
+            
         if document_id not in document_store:
             raise HTTPException(status_code=404, detail="Документ не найден")
         
-        # Удаление из векторной БД
-        await vector_db.delete_document(document_id)
+        if vector_db:
+            await vector_db.delete_document(document_id)
         
-        # Удаление файла
         file_path = document_store[document_id].get("file_path")
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
         
-        # Удаление из хранилища
-        del document_store[document_id]
+        for collection_id in collections_store:
+            if document_id in collections_store[collection_id]["docIds"]:
+                collections_store[collection_id]["docIds"].remove(document_id)
         
+        del document_store[document_id]
         return {"message": "Документ успешно удален"}
     
     except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Ошибка удаления документа: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Ошибка удаления документа: {str(e)}")
+
+@app.get("/api/documents")
+async def get_all_documents():
+    """Получить все документы"""
+    return list(document_store.values())
+
+@app.get("/api/collections/{collection_id}/documents")
+async def get_collection_documents_api(collection_id: str):
+    """Получить документы конкретной коллекции"""
+    print(f"🔍 Запрос документов коллекции: {collection_id}")
+    print(f"📁 Все коллекции: {list(collections_store.keys())}")
+    
+    doc_ids = get_collection_documents(collection_id)
+    print(f"🔍 ID документов в коллекции {collection_id}: {doc_ids}")
+    
+    documents = []
+    
+    for doc_id in doc_ids:
+        if doc_id in document_store:
+            documents.append(document_store[doc_id])
+    
+    print(f"📦 Возвращаем {len(documents)} документов")
+    return documents
+
+@app.post("/api/collections")
+async def create_collection(collection_data: CollectionCreateRequest):
+    """Создать коллекцию"""
+    collection_id = collection_data.id
+    name = collection_data.name
+    
+    if collection_id not in collections_store:
+        collections_store[collection_id] = {
+            "id": collection_id,
+            "name": name,
+            "docIds": [],
+            "chatHistory": [],
+            "createdAt": datetime.now().isoformat()
+        }
+        print(f"✅ Создана коллекция: {collection_id} - {name}")
+    else:
+        print(f"⚠️ Коллекция {collection_id} уже существует")
+    
+    return collections_store[collection_id]
+
+@app.get("/api/collections")
+async def get_all_collections():
+    """Получить все коллекции"""
+    return list(collections_store.values())
+
+@app.delete("/api/collections/{collection_id}")
+async def delete_collection(collection_id: str):
+    """Удалить коллекцию"""
+    if collection_id not in collections_store:
+        raise HTTPException(status_code=404, detail="Коллекция не найдена")
+    
+    # Не позволяем удалить дефолтную коллекцию
+    if collection_id == "default":
+        raise HTTPException(status_code=400, detail="Нельзя удалить дефолтную коллекцию")
+    
+    # Удаляем документы коллекции
+    doc_ids = get_collection_documents(collection_id)
+    for doc_id in doc_ids:
+        if doc_id in document_store:
+            del document_store[doc_id]
+    
+    del collections_store[collection_id]
+    return {"message": "Коллекция удалена"}
 
 if __name__ == "__main__":
     import uvicorn
-    # 🔥 Запуск с увеличенными таймаутами
-    uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=8000,
-        timeout_keep_alive=300,  # Увеличиваем таймауты uvicorn
-        timeout_notify=300
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_keep_alive=300)

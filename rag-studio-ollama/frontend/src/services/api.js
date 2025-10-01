@@ -1,14 +1,10 @@
-// frontend/src/services/api.ts
 import axios from 'axios';
-// Определяем базовый URL для API
-// В режиме разработки (Vite) — используем прокси через /api
-// В production (Docker + Nginx) — запросы идут напрямую, но Nginx проксирует их на бэкенд
 const API_BASE = '/api';
 // Мок-режим для разработки без backend
 const USE_MOCK = Boolean(import.meta.env.VITE_USE_MOCK);
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 const mockDb = {};
-const mockCollections = {}; // collectionId -> documentIds
+const mockCollections = {};
 export const api = axios.create({
     baseURL: API_BASE,
     timeout: 300000,
@@ -22,13 +18,19 @@ const mockApi = {
         await delay(150);
         return { data: { models: ['mock-model'] } };
     },
-    uploadDocument: async (file) => {
+    uploadDocument: async (file, collectionId) => {
         await delay(400);
         const id = crypto.randomUUID();
         mockDb[id] = { status: 'processed', filename: file.name, chunks: 3 };
+        if (collectionId) {
+            if (!mockCollections[collectionId]) {
+                mockCollections[collectionId] = [];
+            }
+            mockCollections[collectionId].push(id);
+        }
         return { data: { document_id: id, filename: file.name, status: 'processing', message: 'Документ принят в обработку' } };
     },
-    uploadDocumentWithProgress: async (file, onProgress) => {
+    uploadDocumentWithProgress: async (file, onProgress, collectionId) => {
         let p = 0;
         await new Promise((resolve) => {
             const h = setInterval(() => {
@@ -42,6 +44,12 @@ const mockApi = {
         });
         const id = crypto.randomUUID();
         mockDb[id] = { status: 'processed', filename: file.name, chunks: 3 };
+        if (collectionId) {
+            if (!mockCollections[collectionId]) {
+                mockCollections[collectionId] = [];
+            }
+            mockCollections[collectionId].push(id);
+        }
         return { data: { document_id: id, filename: file.name, status: 'processing', message: 'Документ принят в обработку' } };
     },
     getDocumentStatus: async (id) => {
@@ -50,13 +58,6 @@ const mockApi = {
         if (!doc)
             throw new Error('Документ не найден');
         return { data: { filename: doc.filename, status: doc.status, chunks_count: doc.chunks } };
-    },
-    askQuestion: async (data) => {
-        await delay(500);
-        if (!mockDb[data.document_id])
-            throw new Error('Документ не найден');
-        const filename = mockDb[data.document_id].filename;
-        return { data: { answer: 'Мок-ответ на основе загруженного документа.', sources: [filename], document_id: data.document_id, processing_time: 0.5 } };
     },
     askCollectionQuestion: async (data) => {
         await delay(800);
@@ -74,16 +75,30 @@ const mockApi = {
     deleteDocument: async (id) => {
         await delay(150);
         delete mockDb[id];
-        // Удаляем документ из всех коллекций
         Object.keys(mockCollections).forEach(collectionId => {
             mockCollections[collectionId] = mockCollections[collectionId].filter(docId => docId !== id);
         });
         return { data: { message: 'Документ успешно удален' } };
+    },
+    createCollection: async (data) => {
+        await delay(150);
+        mockCollections[data.id] = [];
+        return { data: { id: data.id, name: data.name, docIds: [], chatHistory: [], createdAt: Date.now() } };
+    },
+    getCollectionDocuments: async (collectionId) => {
+        await delay(150);
+        const docIds = mockCollections[collectionId] || [];
+        const documents = docIds.map(docId => mockDb[docId] ? {
+            id: docId,
+            filename: mockDb[docId].filename,
+            status: mockDb[docId].status,
+            chunks_count: mockDb[docId].chunks
+        } : null).filter(Boolean);
+        return { data: documents };
     }
 };
 // Инициализируем мок-данные для тестирования
 if (USE_MOCK) {
-    // Создаем тестовую коллекцию с документами
     const testCollectionId = 'test-collection';
     const testDoc1 = 'test-doc-1';
     const testDoc2 = 'test-doc-2';
@@ -94,18 +109,22 @@ if (USE_MOCK) {
 // Эндпоинты
 export const getHealth = USE_MOCK ? mockApi.getHealth : () => api.get('/health');
 export const getModels = USE_MOCK ? mockApi.getModels : () => api.get('/models');
-export const uploadDocument = USE_MOCK ? mockApi.uploadDocument : (file) => {
+export const uploadDocument = USE_MOCK ? mockApi.uploadDocument : (file, collectionId) => {
     const formData = new FormData();
     formData.append('file', file);
+    if (collectionId) {
+        formData.append('collection_id', collectionId);
+    }
     return api.post('/upload', formData, {
-        headers: {
-            'Content-Type': 'multipart/form-data',
-        },
+        headers: { 'Content-Type': 'multipart/form-data' },
     });
 };
-export const uploadDocumentWithProgress = USE_MOCK ? mockApi.uploadDocumentWithProgress : (file, onProgress) => {
+export const uploadDocumentWithProgress = USE_MOCK ? mockApi.uploadDocumentWithProgress : (file, onProgress, collectionId) => {
     const formData = new FormData();
     formData.append('file', file);
+    if (collectionId) {
+        formData.append('collection_id', collectionId);
+    }
     return api.post('/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (evt) => {
@@ -117,6 +136,12 @@ export const uploadDocumentWithProgress = USE_MOCK ? mockApi.uploadDocumentWithP
     });
 };
 export const getDocumentStatus = USE_MOCK ? mockApi.getDocumentStatus : (id) => api.get(`/documents/${id}/status`);
-export const askQuestion = USE_MOCK ? mockApi.askQuestion : (data) => api.post('/ask', data);
-export const askCollectionQuestion = USE_MOCK ? mockApi.askCollectionQuestion : (data) => api.post('/ask-collection', data);
+export const askCollectionQuestion = USE_MOCK ? mockApi.askCollectionQuestion : (data) => api.post(`/collections/${data.collection_id}/ask`, {
+    question: data.question,
+    model: data.model,
+    temperature: data.temperature,
+    max_tokens: data.max_tokens
+});
 export const deleteDocument = USE_MOCK ? mockApi.deleteDocument : (id) => api.delete(`/documents/${id}`);
+export const createCollection = USE_MOCK ? mockApi.createCollection : (data) => api.post('/collections', data);
+export const getCollectionDocuments = USE_MOCK ? mockApi.getCollectionDocuments : (collectionId) => api.get(`/collections/${collectionId}/documents`);
