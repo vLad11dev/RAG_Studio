@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { FileText, Trash2, Download, Info } from 'lucide-react';
 import { DocumentStatus } from '../types';
 
@@ -25,6 +25,84 @@ interface DocumentTableProps {
   pageSize: number;
   onPageSizeChange: (size: number) => void;
 }
+
+// Компонент кастомного селекта для таблицы
+interface CustomSelectProps {
+  value: string;
+  onChange: (value: string) => void;
+  options: Array<{ value: string; label: string }>;
+  placeholder?: string;
+  className?: string;
+}
+
+const CustomSelect: React.FC<CustomSelectProps> = ({ 
+  value, 
+  onChange, 
+  options, 
+  placeholder = "Выберите...",
+  className = ""
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const selectRef = useRef<HTMLDivElement>(null);
+
+  const selectedOption = options.find(opt => opt.value === value);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (selectRef.current && !selectRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div 
+      ref={selectRef}
+      className={`custom-select relative ${isOpen ? 'open' : ''} ${className}`}
+    >
+      <div 
+        className="custom-select__trigger flex items-center justify-between px-3 py-2 bg-white border border-gray-300 rounded-xl cursor-pointer transition-all duration-200 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+        onClick={() => setIsOpen(!isOpen)}
+      >
+        <span className="truncate text-sm">{selectedOption?.label || placeholder}</span>
+        <svg 
+          className={`w-4 h-4 text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
+          fill="none" 
+          stroke="currentColor" 
+          viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </div>
+      
+      <div className={`custom-select__options absolute top-full left-0 right-0 bg-white border border-gray-200 rounded-xl shadow-lg mt-1 z-50 transition-all duration-200 ${
+        isOpen ? 'opacity-100 visible translate-y-0' : 'opacity-0 invisible -translate-y-2'
+      }`}>
+        <div className="max-h-60 overflow-y-auto">
+          {options.map(option => (
+            <div
+              key={option.value}
+              className={`px-3 py-2 cursor-pointer transition-all duration-150 text-sm ${
+                option.value === value 
+                  ? 'bg-indigo-50 text-indigo-700 font-medium' 
+                  : 'hover:bg-gray-50 hover:translate-x-1'
+              }`}
+              onClick={() => {
+                onChange(option.value);
+                setIsOpen(false);
+              }}
+            >
+              {option.label}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 export default function DocumentTable({
   documents,
@@ -80,24 +158,25 @@ export default function DocumentTable({
             value={search}
             onChange={(e) => onSearch(e.target.value)}
             placeholder="Поиск по имени или ID"
-            className="border border-gray-300 rounded-lg px-3 py-2 w-full sm:max-w-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="border border-gray-300 rounded-lg px-3 py-2 w-full sm:max-w-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200"
           />
           
           <div className="flex items-center gap-2 flex-wrap">
-            <select 
-              value={pageSize} 
-              onChange={(e) => onPageSizeChange(Number(e.target.value))}
-              className="border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            >
-              <option value={10}>10 на стр.</option>
-              <option value={20}>20 на стр.</option>
-              <option value={50}>50 на стр.</option>
-            </select>
+            <CustomSelect
+              value={pageSize.toString()}
+              onChange={(value) => onPageSizeChange(Number(value))}
+              options={[
+                { value: '10', label: '10 на стр.' },
+                { value: '20', label: '20 на стр.' },
+                { value: '50', label: '50 на стр.' }
+              ]}
+              className="min-w-[130px]"
+            />
 
             <button
               onClick={onSelectAll}
               disabled={filtered.length === 0}
-              className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50 transition-all duration-200 transform hover:scale-105"
             >
               Выбрать всё
             </button>
@@ -105,7 +184,7 @@ export default function DocumentTable({
             <button
               onClick={onBulkDelete}
               disabled={selectedIds.size === 0}
-              className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center gap-2"
+              className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center gap-2 transition-all duration-200 transform hover:scale-105"
             >
               <Trash2 size={16} />
               Удалить ({selectedIds.size})
@@ -146,7 +225,7 @@ export default function DocumentTable({
               return (
                 <tr 
                   key={doc.id} 
-                  className={`hover:bg-gray-50 ${isSelected ? 'bg-blue-50' : ''}`}
+                  className={`hover:bg-gray-50 transition-colors duration-150 ${isSelected ? 'bg-blue-50' : ''}`}
                 >
                   <td className="px-6 py-4 whitespace-nowrap">
                     <input
@@ -198,7 +277,7 @@ export default function DocumentTable({
                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                     <button
                       onClick={() => onDelete(doc.id)}
-                      className="text-red-600 hover:text-red-900 p-1 rounded hover:bg-red-50"
+                      className="text-red-600 hover:text-red-900 p-1 rounded hover:bg-red-50 transition-all duration-200 transform hover:scale-110"
                       title="Удалить документ"
                     >
                       <Trash2 size={16} />
@@ -224,7 +303,7 @@ export default function DocumentTable({
               <button
                 onClick={() => onPageChange(currentPage - 1)}
                 disabled={currentPage === 1}
-                className="px-3 py-1 border border-gray-300 rounded text-sm disabled:opacity-50 hover:bg-gray-50"
+                className="px-3 py-1 border border-gray-300 rounded text-sm disabled:opacity-50 hover:bg-gray-50 transition-all duration-200 transform hover:scale-105"
               >
                 Назад
               </button>
@@ -234,7 +313,7 @@ export default function DocumentTable({
               <button
                 onClick={() => onPageChange(currentPage + 1)}
                 disabled={currentPage === totalPages}
-                className="px-3 py-1 border border-gray-300 rounded text-sm disabled:opacity-50 hover:bg-gray-50"
+                className="px-3 py-1 border border-gray-300 rounded text-sm disabled:opacity-50 hover:bg-gray-50 transition-all duration-200 transform hover:scale-105"
               >
                 Вперёд
               </button>

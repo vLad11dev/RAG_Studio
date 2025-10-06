@@ -1,5 +1,5 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { toast } from 'react-hot-toast';
 import ToastProvider from './components/Toast';
 import Header from './components/Header';
@@ -7,6 +7,26 @@ import UploadZone from './components/UploadZone';
 import DocumentTable from './components/DocumentTable';
 import Chat from './components/Chat';
 import { getHealth, getModels, uploadDocumentWithProgress, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments } from './services/api';
+const CustomSelect = ({ value, onChange, options, placeholder = "Выберите...", className = "" }) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const selectRef = useRef(null);
+    const selectedOption = options.find(opt => opt.value === value);
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (selectRef.current && !selectRef.current.contains(event.target)) {
+                setIsOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+    return (_jsxs("div", { ref: selectRef, className: `custom-select relative min-w-[200px] ${isOpen ? 'open' : ''} ${className}`, children: [_jsxs("div", { className: "custom-select__trigger flex items-center justify-between px-3 py-2 bg-white border border-gray-300 rounded-xl cursor-pointer transition-all duration-200 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent", onClick: () => setIsOpen(!isOpen), children: [_jsx("span", { className: "truncate", children: selectedOption?.label || placeholder }), _jsx("svg", { className: `w-4 h-4 text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`, fill: "none", stroke: "currentColor", viewBox: "0 0 24 24", children: _jsx("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M19 9l-7 7-7-7" }) })] }), _jsx("div", { className: `custom-select__options absolute top-full left-0 right-0 bg-white border border-gray-200 rounded-xl shadow-lg mt-1 z-50 transition-all duration-200 ${isOpen ? 'opacity-100 visible translate-y-0' : 'opacity-0 invisible -translate-y-2'}`, children: _jsx("div", { className: "max-h-60 overflow-y-auto", children: options.map(option => (_jsx("div", { className: `px-3 py-2 cursor-pointer transition-all duration-150 ${option.value === value
+                            ? 'bg-indigo-50 text-indigo-700 font-medium'
+                            : 'hover:bg-gray-50 hover:translate-x-1'}`, onClick: () => {
+                            onChange(option.value);
+                            setIsOpen(false);
+                        }, children: option.label }, option.value))) }) })] }));
+};
 function App() {
     const [documents, setDocuments] = useState([]);
     const [collections, setCollections] = useState([]);
@@ -20,6 +40,9 @@ function App() {
     const [pageSize, setPageSize] = useState(20);
     const [selectedIds, setSelectedIds] = useState(new Set());
     const [activeTab, setActiveTab] = useState('docs');
+    // Состояния для редактирования коллекции
+    const [editingCollectionId, setEditingCollectionId] = useState(null);
+    const [editingCollectionName, setEditingCollectionName] = useState('');
     const activeCollection = collections.find(c => c.id === activeCollectionId);
     // Загрузка документов коллекции
     const loadCollectionDocuments = async (collectionId) => {
@@ -109,21 +132,17 @@ function App() {
                         lastProgress = p;
                         setDocuments(prev => prev.map(d => d.id === tempId ? { ...d, progress: p } : d));
                     }
-                }, activeCollectionId || 'default' // 🔥 ПЕРЕДАЕМ COLLECTION_ID
-                );
+                }, activeCollectionId || 'default');
                 const { document_id } = res.data;
-                // Заменяем временный ID на настоящий
                 setDocuments(prev => prev.map(d => d.id === tempId ? {
                     id: document_id,
                     filename: file.name,
                     status: 'processing'
                 } : d));
-                // Обновляем коллекцию
                 setCollections(prev => prev.map(c => c.id === activeCollectionId
                     ? { ...c, docIds: [...c.docIds, document_id] }
                     : c));
                 toast.success(`Файл "${file.name}" загружен`);
-                // Обновляем документы через 2 секунды
                 setTimeout(() => {
                     if (activeCollectionId) {
                         loadCollectionDocuments(activeCollectionId);
@@ -154,7 +173,6 @@ function App() {
             content: message,
             timestamp: Date.now(),
         };
-        // Добавляем сообщение пользователя
         setCollections(prev => prev.map(c => c.id === activeCollectionId
             ? { ...c, chatHistory: [...c.chatHistory, userMessage] }
             : c));
@@ -174,7 +192,6 @@ function App() {
                 sources: res.data.sources,
                 timestamp: Date.now(),
             };
-            // Добавляем ответ ассистента
             setCollections(prev => prev.map(c => c.id === activeCollectionId
                 ? { ...c, chatHistory: [...c.chatHistory, assistantMessage] }
                 : c));
@@ -287,13 +304,31 @@ function App() {
             toast.error('Ошибка создания коллекции');
         }
     };
-    const handleRenameCollection = (collectionId, newName) => {
-        if (!newName.trim()) {
+    // Обработчики для редактирования коллекции
+    const handleRenameStart = (collectionId, currentName) => {
+        setEditingCollectionId(collectionId);
+        setEditingCollectionName(currentName);
+    };
+    const handleRenameChange = (newName) => {
+        setEditingCollectionName(newName);
+    };
+    const handleRenameSave = (collectionId) => {
+        const trimmedName = editingCollectionName.trim();
+        if (!trimmedName) {
             toast.error('Название коллекции не может быть пустым');
+            // Восстанавливаем оригинальное название
+            const originalCollection = collections.find(c => c.id === collectionId);
+            setEditingCollectionName(originalCollection?.name || '');
             return;
         }
-        setCollections(prev => prev.map(c => c.id === collectionId ? { ...c, name: newName.trim() } : c));
+        setCollections(prev => prev.map(c => c.id === collectionId ? { ...c, name: trimmedName } : c));
+        setEditingCollectionId(null);
         toast.success('Коллекция переименована');
+    };
+    const handleRenameCancel = (collectionId) => {
+        const originalCollection = collections.find(c => c.id === collectionId);
+        setEditingCollectionName(originalCollection?.name || '');
+        setEditingCollectionId(null);
     };
     const handleDeleteCollection = async () => {
         if (!activeCollectionId)
@@ -303,7 +338,6 @@ function App() {
             return;
         if (!window.confirm(`Удалить коллекцию "${collection.name}" и все её документы?`))
             return;
-        // Удаляем документы коллекции
         for (const docId of collection.docIds) {
             try {
                 await deleteDocument(docId);
@@ -355,10 +389,20 @@ function App() {
     }, [documents.length]);
     // Фильтрация документов активной коллекции
     const filteredDocuments = documents.filter(d => !activeCollectionId || activeCollection?.docIds.includes(d.id));
-    return (_jsxs("div", { className: "min-h-screen bg-gray-50", children: [_jsx(Header, {}), _jsx(ToastProvider, {}), _jsxs("main", { className: "max-w-7xl mx-auto px-4 py-6", children: [_jsxs("div", { className: "mb-6 p-4 bg-white rounded-lg shadow-sm border", children: [_jsxs("div", { className: "flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4", children: [_jsxs("div", { className: "flex items-center gap-4", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "font-medium", children: "Ollama:" }), (ollamaStatus === 'connected' || ollamaStatus === 'mock:ready') ? (_jsx("span", { className: "text-green-600", children: "\u2705 \u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D" })) : ollamaStatus === 'checking...' ? (_jsx("span", { className: "text-gray-500", children: "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430..." })) : (_jsx("span", { className: "text-red-600", children: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D" }))] }), models.length > 0 && (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("label", { className: "text-sm text-gray-600", children: "\u041C\u043E\u0434\u0435\u043B\u044C:" }), _jsx("select", { value: selectedModel, onChange: (e) => setSelectedModel(e.target.value), className: "border border-gray-300 rounded-lg px-3 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-500", children: models.map(model => (_jsx("option", { value: model, children: model }, model))) })] }))] }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "text-sm text-gray-600", children: "\u041A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F:" }), _jsxs("select", { value: activeCollectionId || '', onChange: (e) => setActiveCollectionId(e.target.value || null), className: "border border-gray-300 rounded-lg px-3 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-500 min-w-[200px]", children: [collections.map(c => (_jsxs("option", { value: c.id, children: [c.name, " (", c.docIds.length, " \u0434\u043E\u043A.)"] }, c.id))), collections.length === 0 && _jsx("option", { value: "", children: "\u2014 \u043D\u0435\u0442 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0439 \u2014" })] })] }), _jsx("button", { onClick: () => handleCreateCollection(), className: "px-4 py-1 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700", children: "\u041D\u043E\u0432\u0430\u044F" }), collections.length > 0 && (_jsx("button", { onClick: handleDeleteCollection, className: "px-4 py-1 border border-red-300 text-red-700 rounded-lg hover:bg-red-50", children: "\u0423\u0434\u0430\u043B\u0438\u0442\u044C" }))] })] }), activeCollection && (_jsx("div", { className: "mt-3 pt-3 border-t", children: _jsx("input", { value: activeCollection.name, onChange: (e) => handleRenameCollection(activeCollection.id, e.target.value), className: "text-lg font-semibold bg-transparent border-none focus:outline-none focus:ring-1 focus:ring-indigo-500 px-2 py-1 rounded", onBlur: (e) => handleRenameCollection(activeCollection.id, e.target.value) }) }))] }), _jsx("div", { className: "mb-6 border-b", children: _jsxs("div", { className: "flex gap-8", children: [_jsx("button", { onClick: () => setActiveTab('docs'), className: `px-4 py-2 -mb-px border-b-2 font-medium text-sm ${activeTab === 'docs'
-                                        ? 'border-indigo-600 text-indigo-700'
-                                        : 'border-transparent text-gray-500 hover:text-gray-700'}`, children: "\uD83D\uDCC4 \u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u044B" }), _jsx("button", { onClick: () => setActiveTab('chat'), className: `px-4 py-2 -mb-px border-b-2 font-medium text-sm ${activeTab === 'chat'
-                                        ? 'border-indigo-600 text-indigo-700'
-                                        : 'border-transparent text-gray-500 hover:text-gray-700'}`, children: "\uD83D\uDCAC \u0427\u0430\u0442 \u0441 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0435\u0439" })] }) }), activeTab === 'docs' ? (_jsxs("div", { className: "space-y-6", children: [_jsx(UploadZone, { onUpload: handleUpload }), filteredDocuments.length > 0 && (_jsx(DocumentTable, { documents: filteredDocuments, selectedIds: selectedIds, onSelect: handleSelectDocument, onSelectAll: handleSelectAll, onDelete: handleDelete, onBulkDelete: handleBulkDelete, search: search, onSearch: setSearch, page: page, onPageChange: setPage, pageSize: pageSize, onPageSizeChange: setPageSize }))] })) : (_jsx("div", { className: "h-[600px]", children: _jsx(Chat, { collection: activeCollection || null, onSendMessage: handleSendMessage, isAsking: isAsking, selectedModel: selectedModel }) }))] })] }));
+    return (_jsxs("div", { className: "min-h-screen bg-gray-50", children: [_jsx(Header, {}), _jsx(ToastProvider, {}), _jsxs("main", { className: "max-w-7xl mx-auto px-4 py-6", children: [_jsxs("div", { className: "mb-6 p-4 bg-white rounded-lg shadow-sm border transition-all duration-300 hover:shadow-md", children: [_jsxs("div", { className: "flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4", children: [_jsxs("div", { className: "flex items-center gap-4", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "font-medium", children: "Ollama:" }), (ollamaStatus === 'connected' || ollamaStatus === 'mock:ready') ? (_jsx("span", { className: "text-green-600 animate-pulse", children: "\u2705 \u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D" })) : ollamaStatus === 'checking...' ? (_jsx("span", { className: "text-gray-500 animate-pulse", children: "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430..." })) : (_jsx("span", { className: "text-red-600", children: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D" }))] }), models.length > 0 && (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("label", { className: "text-sm text-gray-600", children: "\u041C\u043E\u0434\u0435\u043B\u044C:" }), _jsx(CustomSelect, { value: selectedModel, onChange: setSelectedModel, options: models.map(model => ({ value: model, label: model })) })] }))] }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "text-sm text-gray-600", children: "\u041A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F:" }), _jsx(CustomSelect, { value: activeCollectionId || '', onChange: setActiveCollectionId, options: collections.map(c => ({
+                                                            value: c.id,
+                                                            label: `${c.name} (${c.docIds.length} док.)`
+                                                        })), placeholder: "\u2014 \u043D\u0435\u0442 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0439 \u2014" })] }), _jsxs("button", { onClick: () => handleCreateCollection(), className: "px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-all duration-200 transform hover:scale-105 flex items-center gap-1 shadow-sm hover:shadow-md", children: [_jsx("svg", { className: "h-4 w-4", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24", children: _jsx("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M12 4v16m8-8H4" }) }), "\u041D\u043E\u0432\u0430\u044F"] }), collections.length > 0 && (_jsxs("button", { onClick: handleDeleteCollection, className: "px-4 py-2 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 transition-all duration-200 transform hover:scale-105 flex items-center gap-1", children: [_jsx("svg", { className: "h-4 w-4", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24", children: _jsx("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" }) }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C"] }))] })] }), activeCollection && (_jsx("div", { className: "mt-3 pt-3 border-t transition-all duration-300", children: editingCollectionId === activeCollection.id ? (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("input", { value: editingCollectionName, onChange: (e) => handleRenameChange(e.target.value), className: "text-lg font-semibold border border-gray-300 rounded-lg px-3 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200 flex-1", autoFocus: true, onKeyDown: (e) => {
+                                                if (e.key === 'Enter') {
+                                                    handleRenameSave(activeCollection.id);
+                                                }
+                                                else if (e.key === 'Escape') {
+                                                    handleRenameCancel(activeCollection.id);
+                                                }
+                                            } }), _jsx("button", { onClick: () => handleRenameSave(activeCollection.id), className: "px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-all duration-200", children: "\u2713" }), _jsx("button", { onClick: () => handleRenameCancel(activeCollection.id), className: "px-3 py-1 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition-all duration-200", children: "\u2717" })] })) : (_jsxs("div", { className: "text-lg font-semibold px-2 py-1 rounded hover:bg-gray-50 cursor-text transition-all duration-200", onClick: () => handleRenameStart(activeCollection.id, activeCollection.name), children: [activeCollection.name, _jsx("span", { className: "ml-2 text-sm text-gray-400", children: "\u270F\uFE0F" })] })) }))] }), _jsx("div", { className: "mb-6 border-b", children: _jsxs("div", { className: "flex gap-8", children: [_jsx("button", { onClick: () => setActiveTab('docs'), className: `px-4 py-2 -mb-px border-b-2 font-medium text-sm transition-all duration-200 transform hover:scale-105 ${activeTab === 'docs'
+                                        ? 'border-indigo-600 text-indigo-700 bg-indigo-50 rounded-t-lg'
+                                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50 rounded-t-lg'}`, children: "\uD83D\uDCC4 \u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u044B" }), _jsx("button", { onClick: () => setActiveTab('chat'), className: `px-4 py-2 -mb-px border-b-2 font-medium text-sm transition-all duration-200 transform hover:scale-105 ${activeTab === 'chat'
+                                        ? 'border-indigo-600 text-indigo-700 bg-indigo-50 rounded-t-lg'
+                                        : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50 rounded-t-lg'}`, children: "\uD83D\uDCAC \u0427\u0430\u0442 \u0441 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0435\u0439" })] }) }), activeTab === 'docs' ? (_jsxs("div", { className: "space-y-6 animate-in fade-in duration-300", children: [_jsx(UploadZone, { onUpload: handleUpload }), filteredDocuments.length > 0 && (_jsx(DocumentTable, { documents: filteredDocuments, selectedIds: selectedIds, onSelect: handleSelectDocument, onSelectAll: handleSelectAll, onDelete: handleDelete, onBulkDelete: handleBulkDelete, search: search, onSearch: setSearch, page: page, onPageChange: setPage, pageSize: pageSize, onPageSizeChange: setPageSize }))] })) : (_jsx("div", { className: "h-[600px] animate-in fade-in duration-300", children: _jsx(Chat, { collection: activeCollection || null, onSendMessage: handleSendMessage, isAsking: isAsking, selectedModel: selectedModel }) }))] })] }));
 }
 export default App;
