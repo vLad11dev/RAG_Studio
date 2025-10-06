@@ -93,14 +93,20 @@ export default function Chat({ collection, onSendMessage, isAsking, selectedMode
                 {/* Источники */}
                 {message.role === 'assistant' && message.sources && message.sources.length > 0 && (
                   <div className="mt-2 text-left">
-                    <p className="text-xs text-gray-500 mb-1">Источники:</p>
-                    <ul className="text-xs text-gray-600 space-y-1">
+                    <p className="text-xs text-gray-500 mb-2 font-medium">Источники:</p>
+                    <div className="flex flex-wrap gap-2 max-w-full">
                       {message.sources.map((source, index) => (
-                        <li key={index} className="bg-gray-50 px-2 py-1 rounded">
+                        <div 
+                          key={index}
+                          className="bg-blue-50 border border-blue-200 px-3 py-2 rounded-lg text-sm text-blue-800 break-words max-w-xs" 
+                        >
+                          {!source.includes('Нет доступных документов') && (
+                            <span className="font-medium text-blue-600 mr-1">{index + 1}.</span>
+                          )}
                           {source}
-                        </li>
+                        </div>
                       ))}
-                    </ul>
+                    </div>
                   </div>
                 )}
                 
