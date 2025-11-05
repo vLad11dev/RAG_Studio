@@ -5,7 +5,8 @@ import Header from './components/Header';
 import UploadZone from './components/UploadZone';
 import DocumentTable from './components/DocumentTable';
 import Chat from './components/Chat';
-import { getHealth, getModels, uploadDocumentWithProgress, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments } from './services/api';
+import Login from './components/Login';
+import { getHealth, getModels, uploadDocumentWithProgress, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments, getCurrentUser, getStoredUser, setStoredUser, removeAuthToken } from './services/api';
 import { DocumentStatus, HealthResponse, Collection, ChatMessage } from './types';
 
 // Компонент для кастомного select
@@ -96,6 +97,12 @@ function App() {
     progress?: number;
   };
 
+  // Состояния для аутентификации
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+
+  // Остальные состояния
   const [documents, setDocuments] = useState<UiDoc[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [activeCollectionId, setActiveCollectionId] = useState<string | null>(null);
@@ -115,6 +122,47 @@ function App() {
 
   const activeCollection = collections.find(c => c.id === activeCollectionId);
 
+  // Проверка аутентификации при загрузке
+  useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        // Проверяем, есть ли сохраненный пользователь
+        const storedUser = getStoredUser();
+        if (storedUser) {
+          setCurrentUser(storedUser);
+          setIsAuthenticated(true);
+        } else {
+          // Пробуем получить текущего пользователя с сервера
+          const response = await getCurrentUser();
+          setCurrentUser(response.data);
+          setStoredUser(response.data);
+          setIsAuthenticated(true);
+        }
+      } catch (error) {
+        // Если ошибка 401 или другая - пользователь не авторизован
+        setIsAuthenticated(false);
+      } finally {
+        setIsAuthChecking(false);
+      }
+    };
+
+    checkAuth();
+  }, []);
+
+  // Функции для аутентификации
+  const handleLoginSuccess = (user: any) => {
+    setCurrentUser(user);
+    setIsAuthenticated(true);
+    toast.success(`Добро пожаловать, ${user.username}!`);
+  };
+
+  const handleLogout = () => {
+    removeAuthToken();
+    setCurrentUser(null);
+    setIsAuthenticated(false);
+    toast.success('Вы вышли из системы');
+  };
+
   // Загрузка документов коллекции
   const loadCollectionDocuments = async (collectionId: string) => {
     try {
@@ -130,8 +178,10 @@ function App() {
     }
   };
 
-  // Инициализация
+  // Инициализация приложения
   useEffect(() => {
+    if (!isAuthenticated) return;
+
     const init = async () => {
       try {
         const healthRes = await getHealth();
@@ -150,10 +200,12 @@ function App() {
       }
     };
     init();
-  }, []);
+  }, [isAuthenticated]);
 
   // Коллекции из localStorage
   useEffect(() => {
+    if (!isAuthenticated) return;
+
     try {
       const raw = localStorage.getItem('rag.collections');
       if (raw) {
@@ -167,19 +219,26 @@ function App() {
     } catch (error) {
       toast.error('Ошибка загрузки коллекций');
     }
-  }, []);
+  }, [isAuthenticated]);
 
   // Сохранение коллекций
   useEffect(() => {
+    if (!isAuthenticated) return;
+
     try {
       localStorage.setItem('rag.collections', JSON.stringify(collections));
     } catch (error) {
       toast.error('Ошибка сохранения коллекций');
     }
-  }, [collections]);
+  }, [collections, isAuthenticated]);
 
   // Загрузка документов
   const handleUpload = async (files: File[]) => {
+    if (!isAuthenticated) {
+      toast.error('Необходима авторизация');
+      return;
+    }
+
     if (!activeCollectionId) {
       const name = window.prompt('Создать коллекцию для этих файлов. Название:');
       if (!name) {
@@ -203,7 +262,7 @@ function App() {
         let lastProgress = 0;
         const res = await uploadDocumentWithProgress(
           file, 
-          (p) => {
+          (p: number) => {
             if (p !== lastProgress) {
               lastProgress = p;
               setDocuments(prev => prev.map(d => 
@@ -247,13 +306,18 @@ function App() {
 
   // Загрузка документов при смене коллекции
   useEffect(() => {
-    if (activeCollectionId) {
+    if (activeCollectionId && isAuthenticated) {
       loadCollectionDocuments(activeCollectionId);
     }
-  }, [activeCollectionId]);
+  }, [activeCollectionId, isAuthenticated]);
 
   // Отправка сообщения в чат
   const handleSendMessage = async (message: string) => {
+    if (!isAuthenticated) {
+      toast.error('Необходима авторизация');
+      return;
+    }
+
     if (!activeCollection || !selectedModel || !activeCollectionId) {
       toast.error('Выберите коллекцию и модель для чата');
       return;
@@ -319,6 +383,11 @@ function App() {
 
   // Управление документами
   const handleDelete = async (id: string) => {
+    if (!isAuthenticated) {
+      toast.error('Необходима авторизация');
+      return;
+    }
+
     if (!window.confirm('Удалить документ?')) return;
 
     try {
@@ -340,6 +409,11 @@ function App() {
   };
 
   const handleBulkDelete = async () => {
+    if (!isAuthenticated) {
+      toast.error('Необходима авторизация');
+      return;
+    }
+
     if (selectedIds.size === 0) return;
     if (!window.confirm(`Удалить ${selectedIds.size} документов?`)) return;
 
@@ -387,6 +461,11 @@ function App() {
 
   // Управление коллекциями
   const handleCreateCollection = async (id?: string, name?: string) => {
+    if (!isAuthenticated) {
+      toast.error('Необходима авторизация');
+      return;
+    }
+
     const collectionName = name || window.prompt('Название новой коллекции:');
     if (!collectionName) {
       toast.error('Название коллекции обязательно');
@@ -446,6 +525,11 @@ function App() {
   };
 
   const handleDeleteCollection = async () => {
+    if (!isAuthenticated) {
+      toast.error('Необходима авторизация');
+      return;
+    }
+
     if (!activeCollectionId) return;
     
     const collection = collections.find(c => c.id === activeCollectionId);
@@ -473,7 +557,7 @@ function App() {
 
   // Обновление статусов документов
   useEffect(() => {
-    if (documents.length === 0) return;
+    if (documents.length === 0 || !isAuthenticated) return;
   
     const tick = async () => {
       const updates: UiDoc[] = await Promise.all(
@@ -507,16 +591,39 @@ function App() {
     const interval = setInterval(tick, 2000);
     tick();
     return () => clearInterval(interval);
-  }, [documents.length]);
+  }, [documents.length, isAuthenticated]);
 
   // Фильтрация документов активной коллекции
   const filteredDocuments = documents.filter(d => 
     !activeCollectionId || activeCollection?.docIds.includes(d.id)
   );
 
+  // Показываем загрузку пока проверяем аутентификацию
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Проверка авторизации...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Показываем страницу логина если не авторизован
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <ToastProvider />
+        <Login onLoginSuccess={handleLoginSuccess} />
+      </div>
+    );
+  }
+
+  // Основной интерфейс приложения
   return (
     <div className="min-h-screen bg-gray-50">
-      <Header />
+      <Header currentUser={currentUser} onLogout={handleLogout} />
       <ToastProvider />
 
       <main className="max-w-7xl mx-auto px-4 py-6">

@@ -18,10 +18,45 @@ const delay = (ms: DelayMs) => new Promise(res => setTimeout(res, ms));
 const mockDb: Record<string, { status: 'processing'|'processed'|'error', filename: string, chunks: number }> = {};
 const mockCollections: Record<string, string[]> = {};
 
+// СОЗДАЕМ API ПЕРВЫМ ДЕЛОМ - ЭТО ГЛАВНОЕ ИСПРАВЛЕНИЕ
 export const api = axios.create({
   baseURL: API_BASE,
   timeout: 300000,
 });
+
+// Интерфейсы для аутентификации
+interface User {
+  id: number;
+  username: string;
+  email: string;
+  full_name: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+interface LoginCredentials {
+  username: string;
+  password: string;
+}
+
+interface RegisterData {
+  username: string;
+  email: string;
+  password: string;
+  full_name?: string;
+}
+
+interface LoginResponse {
+  access_token: string;
+  token_type: string;
+  user: User;
+}
+
+interface RegisterResponse {
+  access_token: string;
+  token_type: string;
+  user: User;
+}
 
 const mockApi = {
   getHealth: async () => {
@@ -109,6 +144,58 @@ const mockApi = {
       chunks_count: mockDb[docId].chunks
     } : null).filter(Boolean);
     return { data: documents };
+  },
+  // Аутентификация
+  login: async (credentials: LoginCredentials) => {
+    await delay(300);
+    if (credentials.username === 'admin' && credentials.password === 'password') {
+      return { 
+        data: { 
+          access_token: 'mock-jwt-token',
+          token_type: 'bearer',
+          user: { 
+            id: 1, 
+            username: 'admin', 
+            email: 'admin@example.com',
+            full_name: 'Admin User',
+            is_active: true,
+            created_at: new Date().toISOString()
+          }
+        } 
+      };
+    } else {
+      throw new Error('Неверное имя пользователя или пароль');
+    }
+  },
+  register: async (userData: RegisterData) => {
+    await delay(300);
+    return { 
+      data: { 
+        access_token: 'mock-jwt-token',
+        token_type: 'bearer',
+        user: { 
+          id: 2, 
+          username: userData.username, 
+          email: userData.email,
+          full_name: userData.full_name || '',
+          is_active: true,
+          created_at: new Date().toISOString()
+        }
+      } 
+    };
+  },
+  getCurrentUser: async () => {
+    await delay(200);
+    return {
+      data: {
+        id: 1,
+        username: 'admin',
+        email: 'admin@example.com',
+        full_name: 'Admin User',
+        is_active: true,
+        created_at: new Date().toISOString()
+      }
+    };
   }
 };
 
@@ -123,7 +210,7 @@ if (USE_MOCK) {
   mockCollections[testCollectionId] = [testDoc1, testDoc2];
 }
 
-// Эндпоинты
+// Эндпоинты документов и коллекций
 export const getHealth = USE_MOCK ? mockApi.getHealth : () => api.get<HealthResponse>('/health');
 export const getModels = USE_MOCK ? mockApi.getModels : () => api.get<{ models: string[] }>('/models');
 
@@ -178,3 +265,60 @@ export const createCollection = USE_MOCK ? mockApi.createCollection : (data: { i
 
 export const getCollectionDocuments = USE_MOCK ? mockApi.getCollectionDocuments : (collectionId: string) =>
   api.get(`/collections/${collectionId}/documents`);
+
+// Эндпоинты аутентификации
+export const login = USE_MOCK ? mockApi.login : (credentials: LoginCredentials) =>
+  api.post<LoginResponse>('/auth/login', credentials);
+
+export const register = USE_MOCK ? mockApi.register : (userData: RegisterData) =>
+  api.post<RegisterResponse>('/auth/register', userData);
+
+export const getCurrentUser = USE_MOCK ? mockApi.getCurrentUser : () =>
+  api.get<User>('/auth/me');
+
+// Интерсептор для добавления токена к запросам
+api.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('auth_token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+// Интерсептор для обработки ошибок авторизации
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      // Токен истек или невалиден
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('user');
+      window.location.href = '/login';
+    }
+    return Promise.reject(error);
+  }
+);
+
+// Вспомогательные функции для работы с аутентификацией
+export const setAuthToken = (token: string) => {
+  localStorage.setItem('auth_token', token);
+};
+
+export const removeAuthToken = () => {
+  localStorage.removeItem('auth_token');
+  localStorage.removeItem('user');
+};
+
+export const getStoredUser = (): User | null => {
+  const userStr = localStorage.getItem('user');
+  return userStr ? JSON.parse(userStr) : null;
+};
+
+export const setStoredUser = (user: User) => {
+  localStorage.setItem('user', JSON.stringify(user));
+};

@@ -2,9 +2,10 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# Установка системных зависимостей
+# Установка системных зависимостей включая netcat
 RUN apt-get update && apt-get install -y \
     curl \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # Копирование и установка Python зависимостей
@@ -14,11 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копирование исходного кода
 COPY . .
 
-# Скрипт для ожидания готовности Ollama
-COPY wait-for-ollama.sh /wait-for-ollama.sh
-RUN chmod +x /wait-for-ollama.sh
+# Создание необходимых директорий
+RUN mkdir -p data/uploaded_files data/chroma_db
 
 EXPOSE 8000
 
-# Запуск с ожиданием готовности Ollama
-CMD ["/wait-for-ollama.sh"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

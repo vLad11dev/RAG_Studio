@@ -6,7 +6,8 @@ import Header from './components/Header';
 import UploadZone from './components/UploadZone';
 import DocumentTable from './components/DocumentTable';
 import Chat from './components/Chat';
-import { getHealth, getModels, uploadDocumentWithProgress, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments } from './services/api';
+import Login from './components/Login';
+import { getHealth, getModels, uploadDocumentWithProgress, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments, getCurrentUser, getStoredUser, setStoredUser, removeAuthToken } from './services/api';
 const CustomSelect = ({ value, onChange, options, placeholder = "Выберите...", className = "" }) => {
     const [isOpen, setIsOpen] = useState(false);
     const selectRef = useRef(null);
@@ -28,6 +29,11 @@ const CustomSelect = ({ value, onChange, options, placeholder = "Выберит�
                         }, children: option.label }, option.value))) }) })] }));
 };
 function App() {
+    // Состояния для аутентификации
+    const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [isAuthChecking, setIsAuthChecking] = useState(true);
+    const [currentUser, setCurrentUser] = useState(null);
+    // Остальные состояния
     const [documents, setDocuments] = useState([]);
     const [collections, setCollections] = useState([]);
     const [activeCollectionId, setActiveCollectionId] = useState(null);
@@ -44,6 +50,46 @@ function App() {
     const [editingCollectionId, setEditingCollectionId] = useState(null);
     const [editingCollectionName, setEditingCollectionName] = useState('');
     const activeCollection = collections.find(c => c.id === activeCollectionId);
+    // Проверка аутентификации при загрузке
+    useEffect(() => {
+        const checkAuth = async () => {
+            try {
+                // Проверяем, есть ли сохраненный пользователь
+                const storedUser = getStoredUser();
+                if (storedUser) {
+                    setCurrentUser(storedUser);
+                    setIsAuthenticated(true);
+                }
+                else {
+                    // Пробуем получить текущего пользователя с сервера
+                    const response = await getCurrentUser();
+                    setCurrentUser(response.data);
+                    setStoredUser(response.data);
+                    setIsAuthenticated(true);
+                }
+            }
+            catch (error) {
+                // Если ошибка 401 или другая - пользователь не авторизован
+                setIsAuthenticated(false);
+            }
+            finally {
+                setIsAuthChecking(false);
+            }
+        };
+        checkAuth();
+    }, []);
+    // Функции для аутентификации
+    const handleLoginSuccess = (user) => {
+        setCurrentUser(user);
+        setIsAuthenticated(true);
+        toast.success(`Добро пожаловать, ${user.username}!`);
+    };
+    const handleLogout = () => {
+        removeAuthToken();
+        setCurrentUser(null);
+        setIsAuthenticated(false);
+        toast.success('Вы вышли из системы');
+    };
     // Загрузка документов коллекции
     const loadCollectionDocuments = async (collectionId) => {
         try {
@@ -59,8 +105,10 @@ function App() {
             console.error('Ошибка загрузки документов коллекции:', error);
         }
     };
-    // Инициализация
+    // Инициализация приложения
     useEffect(() => {
+        if (!isAuthenticated)
+            return;
         const init = async () => {
             try {
                 const healthRes = await getHealth();
@@ -79,9 +127,11 @@ function App() {
             }
         };
         init();
-    }, []);
+    }, [isAuthenticated]);
     // Коллекции из localStorage
     useEffect(() => {
+        if (!isAuthenticated)
+            return;
         try {
             const raw = localStorage.getItem('rag.collections');
             if (raw) {
@@ -96,18 +146,24 @@ function App() {
         catch (error) {
             toast.error('Ошибка загрузки коллекций');
         }
-    }, []);
+    }, [isAuthenticated]);
     // Сохранение коллекций
     useEffect(() => {
+        if (!isAuthenticated)
+            return;
         try {
             localStorage.setItem('rag.collections', JSON.stringify(collections));
         }
         catch (error) {
             toast.error('Ошибка сохранения коллекций');
         }
-    }, [collections]);
+    }, [collections, isAuthenticated]);
     // Загрузка документов
     const handleUpload = async (files) => {
+        if (!isAuthenticated) {
+            toast.error('Необходима авторизация');
+            return;
+        }
         if (!activeCollectionId) {
             const name = window.prompt('Создать коллекцию для этих файлов. Название:');
             if (!name) {
@@ -157,12 +213,16 @@ function App() {
     };
     // Загрузка документов при смене коллекции
     useEffect(() => {
-        if (activeCollectionId) {
+        if (activeCollectionId && isAuthenticated) {
             loadCollectionDocuments(activeCollectionId);
         }
-    }, [activeCollectionId]);
+    }, [activeCollectionId, isAuthenticated]);
     // Отправка сообщения в чат
     const handleSendMessage = async (message) => {
+        if (!isAuthenticated) {
+            toast.error('Необходима авторизация');
+            return;
+        }
         if (!activeCollection || !selectedModel || !activeCollectionId) {
             toast.error('Выберите коллекцию и модель для чата');
             return;
@@ -214,6 +274,10 @@ function App() {
     };
     // Управление документами
     const handleDelete = async (id) => {
+        if (!isAuthenticated) {
+            toast.error('Необходима авторизация');
+            return;
+        }
         if (!window.confirm('Удалить документ?'))
             return;
         try {
@@ -235,6 +299,10 @@ function App() {
         }
     };
     const handleBulkDelete = async () => {
+        if (!isAuthenticated) {
+            toast.error('Необходима авторизация');
+            return;
+        }
         if (selectedIds.size === 0)
             return;
         if (!window.confirm(`Удалить ${selectedIds.size} документов?`))
@@ -281,6 +349,10 @@ function App() {
     };
     // Управление коллекциями
     const handleCreateCollection = async (id, name) => {
+        if (!isAuthenticated) {
+            toast.error('Необходима авторизация');
+            return;
+        }
         const collectionName = name || window.prompt('Название новой коллекции:');
         if (!collectionName) {
             toast.error('Название коллекции обязательно');
@@ -331,6 +403,10 @@ function App() {
         setEditingCollectionId(null);
     };
     const handleDeleteCollection = async () => {
+        if (!isAuthenticated) {
+            toast.error('Необходима авторизация');
+            return;
+        }
         if (!activeCollectionId)
             return;
         const collection = collections.find(c => c.id === activeCollectionId);
@@ -355,7 +431,7 @@ function App() {
     };
     // Обновление статусов документов
     useEffect(() => {
-        if (documents.length === 0)
+        if (documents.length === 0 || !isAuthenticated)
             return;
         const tick = async () => {
             const updates = await Promise.all(documents.map(async (doc) => {
@@ -386,10 +462,19 @@ function App() {
         const interval = setInterval(tick, 2000);
         tick();
         return () => clearInterval(interval);
-    }, [documents.length]);
+    }, [documents.length, isAuthenticated]);
     // Фильтрация документов активной коллекции
     const filteredDocuments = documents.filter(d => !activeCollectionId || activeCollection?.docIds.includes(d.id));
-    return (_jsxs("div", { className: "min-h-screen bg-gray-50", children: [_jsx(Header, {}), _jsx(ToastProvider, {}), _jsxs("main", { className: "max-w-7xl mx-auto px-4 py-6", children: [_jsxs("div", { className: "mb-6 p-4 bg-white rounded-lg shadow-sm border transition-all duration-300 hover:shadow-md", children: [_jsxs("div", { className: "flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4", children: [_jsxs("div", { className: "flex items-center gap-4", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "font-medium", children: "Ollama:" }), (ollamaStatus === 'connected' || ollamaStatus === 'mock:ready') ? (_jsx("span", { className: "text-green-600 animate-pulse", children: "\u2705 \u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D" })) : ollamaStatus === 'checking...' ? (_jsx("span", { className: "text-gray-500 animate-pulse", children: "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430..." })) : (_jsx("span", { className: "text-red-600", children: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D" }))] }), models.length > 0 && (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("label", { className: "text-sm text-gray-600", children: "\u041C\u043E\u0434\u0435\u043B\u044C:" }), _jsx(CustomSelect, { value: selectedModel, onChange: setSelectedModel, options: models.map(model => ({ value: model, label: model })) })] }))] }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "text-sm text-gray-600", children: "\u041A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F:" }), _jsx(CustomSelect, { value: activeCollectionId || '', onChange: setActiveCollectionId, options: collections.map(c => ({
+    // Показываем загрузку пока проверяем аутентификацию
+    if (isAuthChecking) {
+        return (_jsx("div", { className: "min-h-screen bg-gray-50 flex items-center justify-center", children: _jsxs("div", { className: "text-center", children: [_jsx("div", { className: "animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto" }), _jsx("p", { className: "mt-4 text-gray-600", children: "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 \u0430\u0432\u0442\u043E\u0440\u0438\u0437\u0430\u0446\u0438\u0438..." })] }) }));
+    }
+    // Показываем страницу логина если не авторизован
+    if (!isAuthenticated) {
+        return (_jsxs("div", { className: "min-h-screen bg-gray-50", children: [_jsx(ToastProvider, {}), _jsx(Login, { onLoginSuccess: handleLoginSuccess })] }));
+    }
+    // Основной интерфейс приложения
+    return (_jsxs("div", { className: "min-h-screen bg-gray-50", children: [_jsx(Header, { currentUser: currentUser, onLogout: handleLogout }), _jsx(ToastProvider, {}), _jsxs("main", { className: "max-w-7xl mx-auto px-4 py-6", children: [_jsxs("div", { className: "mb-6 p-4 bg-white rounded-lg shadow-sm border transition-all duration-300 hover:shadow-md", children: [_jsxs("div", { className: "flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4", children: [_jsxs("div", { className: "flex items-center gap-4", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "font-medium", children: "Ollama:" }), (ollamaStatus === 'connected' || ollamaStatus === 'mock:ready') ? (_jsx("span", { className: "text-green-600 animate-pulse", children: "\u2705 \u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D" })) : ollamaStatus === 'checking...' ? (_jsx("span", { className: "text-gray-500 animate-pulse", children: "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430..." })) : (_jsx("span", { className: "text-red-600", children: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D" }))] }), models.length > 0 && (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("label", { className: "text-sm text-gray-600", children: "\u041C\u043E\u0434\u0435\u043B\u044C:" }), _jsx(CustomSelect, { value: selectedModel, onChange: setSelectedModel, options: models.map(model => ({ value: model, label: model })) })] }))] }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "text-sm text-gray-600", children: "\u041A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F:" }), _jsx(CustomSelect, { value: activeCollectionId || '', onChange: setActiveCollectionId, options: collections.map(c => ({
                                                             value: c.id,
                                                             label: `${c.name} (${c.docIds.length} док.)`
                                                         })), placeholder: "\u2014 \u043D\u0435\u0442 \u043A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u0439 \u2014" })] }), _jsxs("button", { onClick: () => handleCreateCollection(), className: "px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-all duration-200 transform hover:scale-105 flex items-center gap-1 shadow-sm hover:shadow-md", children: [_jsx("svg", { className: "h-4 w-4", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24", children: _jsx("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M12 4v16m8-8H4" }) }), "\u041D\u043E\u0432\u0430\u044F"] }), collections.length > 0 && (_jsxs("button", { onClick: handleDeleteCollection, className: "px-4 py-2 border border-red-300 text-red-700 rounded-lg hover:bg-red-50 transition-all duration-200 transform hover:scale-105 flex items-center gap-1", children: [_jsx("svg", { className: "h-4 w-4", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24", children: _jsx("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" }) }), "\u0423\u0434\u0430\u043B\u0438\u0442\u044C"] }))] })] }), activeCollection && (_jsx("div", { className: "mt-3 pt-3 border-t transition-all duration-300", children: editingCollectionId === activeCollection.id ? (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("input", { value: editingCollectionName, onChange: (e) => handleRenameChange(e.target.value), className: "text-lg font-semibold border border-gray-300 rounded-lg px-3 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200 flex-1", autoFocus: true, onKeyDown: (e) => {

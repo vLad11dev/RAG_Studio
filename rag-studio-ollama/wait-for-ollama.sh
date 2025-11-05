@@ -1,6 +1,4 @@
-#!/bin/sh
-
-# wait-for-ollama.sh
+#!/bin/bash
 
 set -e
 
@@ -8,10 +6,29 @@ host="$1"
 shift
 cmd="$@"
 
-until curl -sf "http://$host/api/tags" > /dev/null 2>&1; do
-  >&2 echo "⏳ Ожидание готовности Ollama на $host..."
-  sleep 2
-done
+# Функция для проверки доступности сервиса
+wait_for_service() {
+    local host=$1
+    local port=$2
+    local service=$3
+    
+    echo "Ожидание $service на $host:$port..."
+    while ! nc -z $host $port; do
+        sleep 2
+    done
+    echo "$service доступен!"
+}
 
->&2 echo "✅ Ollama готов — запуск: $cmd"
+# Ожидаем PostgreSQL
+wait_for_service db 5432 "PostgreSQL"
+
+# Ожидаем Ollama
+echo "Ожидание Ollama..."
+until curl -f http://ollama:11434/api/tags > /dev/null 2>&1; do
+    sleep 2
+done
+echo "Ollama доступен!"
+
+# Запускаем основное приложение
+echo "Запуск приложения..."
 exec $cmd

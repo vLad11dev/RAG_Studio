@@ -1,6 +1,5 @@
 import chromadb
 from typing import List, Dict, Any
-import uuid
 import os
 
 class VectorDatabase:
