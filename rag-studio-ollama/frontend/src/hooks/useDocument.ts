@@ -12,7 +12,7 @@ export const useDocumentStatus = (documentId: string | null) => {
     const fetchStatus = async () => {
       try {
         const res = await getDocumentStatus(documentId);
-        setStatus(res.data);
+        setStatus(res.data as any);
       } catch (err) {
         setStatus({ status: 'error', error: 'Не удалось загрузить статус' } as any);
       } finally {

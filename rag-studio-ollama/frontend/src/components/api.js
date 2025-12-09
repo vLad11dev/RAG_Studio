@@ -1,27 +1,36 @@
 import axios from 'axios';
+const API_BASE = '/api';
 // Создаем экземпляр axios
-const api = axios.create({
-    baseURL: 'http://localhost:8000/api',
+export const api = axios.create({
+    baseURL: API_BASE,
     timeout: 10000,
 });
 // Интерцептор для добавления токена авторизации
 api.interceptors.request.use((config) => {
-    const token = localStorage.getItem('access_token');
+    const token = localStorage.getItem('auth_token') || localStorage.getItem('access_token');
     if (token) {
         config.headers.Authorization = `Bearer ${token}`;
     }
+    // Отладка запросов
+    console.log('🚀 API Request:', {
+        url: config.url,
+        method: config.method,
+        hasToken: !!token
+    });
     return config;
 }, (error) => {
     return Promise.reject(error);
 });
-// Интерцептор для обработки ошибок
+// ИСПРАВЛЕННЫЙ интерцептор для обработки ошибок - БЕЗ ПЕРЕНАПРАВЛЕНИЙ
 api.interceptors.response.use((response) => {
     return response;
 }, (error) => {
     if (error.response?.status === 401) {
+        // ТОЛЬКО удаляем токен, НЕ ПЕРЕНАПРАВЛЯЕМ
+        console.log('🔐 Token expired or invalid - removing from storage');
+        localStorage.removeItem('auth_token');
         localStorage.removeItem('access_token');
         localStorage.removeItem('user');
-        window.location.href = '/login';
     }
     return Promise.reject(error);
 });
@@ -34,16 +43,30 @@ export const getCurrentUser = () => api.get('/auth/me');
 export const getHealth = () => api.get('/health');
 export const getModels = () => api.get('/models');
 // Документы
+export const uploadDocument = (file, collectionId) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (collectionId) {
+        formData.append('collection_id', collectionId);
+    }
+    return api.post('/documents/upload', formData, {
+        headers: {
+            'Content-Type': 'multipart/form-data',
+        },
+    });
+};
 export const uploadDocumentWithProgress = (file, onProgress, collectionId) => {
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('collection_id', collectionId);
+    if (collectionId) {
+        formData.append('collection_id', collectionId);
+    }
     return api.post('/documents/upload', formData, {
         headers: {
             'Content-Type': 'multipart/form-data',
         },
         onUploadProgress: (progressEvent) => {
-            if (progressEvent.total) {
+            if (progressEvent.total && onProgress) {
                 const progress = (progressEvent.loaded / progressEvent.total) * 100;
                 onProgress(Math.round(progress));
             }
@@ -79,7 +102,13 @@ export const getStoredUser = () => {
 export const setStoredUser = (user) => {
     localStorage.setItem('user', JSON.stringify(user));
 };
+export const setAuthToken = (token) => {
+    localStorage.setItem('auth_token', token);
+    // Для совместимости с существующим кодом
+    localStorage.setItem('access_token', token);
+};
 export const removeAuthToken = () => {
+    localStorage.removeItem('auth_token');
     localStorage.removeItem('access_token');
     localStorage.removeItem('user');
 };

@@ -165,12 +165,19 @@ class RAGChain:
         return context_chunks[:max_chunks]
 
     def _prepare_context(self, context_chunks: List[Dict]) -> str:
+        """Улучшенная подготовка контекста с учетом релевантности"""
         parts = []
         for i, chunk in enumerate(context_chunks):
-            text = chunk.get("text") or chunk.get("page_content", "")
-            if len(text) > 1000:
-                text = text[:1000] + "..."
-            parts.append(f"[Фрагмент {i+1}]: {text}")
+            text = chunk.get("text", "")
+            score = chunk.get("score", 0)
+            
+            # Обрезаем слишком длинные чанки
+            if len(text) > 800:
+                text = text[:800] + "..."
+            
+            # Добавляем информацию о релевантности
+            parts.append(f"[Фрагмент {i+1}, релевантность: {score:.2f}]: {text}")
+        
         return "\n\n".join(parts)
 
     def _build_strict_prompt(self, question: str, context: str) -> str:

@@ -6,10 +6,14 @@ export interface DocumentUploadResponse {
 }
 
 export interface DocumentStatus {
+  id: string;
   filename: string;
-  status: 'processing' | 'processed' | 'error';
-  error?: string;
+  status: 'processing' | 'processed' | 'error'; // конкретные значения вместо string
   chunks_count?: number;
+  error?: string;
+  created_at: string;
+  file_size?: number;
+  file_type?: string;
 }
 
 export interface QuestionRequest {
@@ -22,8 +26,8 @@ export interface QuestionRequest {
 export interface QuestionResponse {
   answer: string;
   sources: string[];
-  document_id?: string;        // сделаем опциональным
-  collection_id?: string;      // добавим для коллекций
+  document_id?: string;       
+  collection_id?: number;      
   processing_time: number;
 }
 

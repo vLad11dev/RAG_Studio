@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  nginx-proxy:
+    image: nginx:alpine
+    container_name: rag-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./frontend/dist:/usr/share/nginx/html
+    depends_on:
+      - backend
+    networks:
+      - rag-network
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - rag-network
+
+  db:
+    image: postgres:15
+    container_name: postgres_db
+    environment:
+      POSTGRES_DB: rag_studio
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - rag-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: rag-backend
+    depends_on:
+      - ollama
+      - db
+    volumes:
+      - /opt/rag/venv/lib/python3.12/site-packages:/usr/local/lib/python3.12/site-packages
+      - ./data/uploaded_files:/app/data/uploaded_files
+      - ./data/chroma_db:/app/data/chroma_db
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - DEFAULT_MODEL=llama3:8b
+      - DATABASE_URL=postgresql://postgres:password@db:5432/rag_studio
+      - PYTHONPATH=/opt/local_packages:/app
+    networks:
+      - rag-network
+    command: >
+      sh -c "
+        echo 'Waiting for Ollama...'
+        while ! curl -f http://ollama:11434/api/tags >/dev/null 2>&1; do
+          sleep 2
+        done
+        echo 'Ollama is ready!'
+        echo 'Waiting for PostgreSQL...'
+        while ! nc -z db 5432; do
+          sleep 2
+        done
+        echo 'PostgreSQL is ready! Starting backend...'
+        uvicorn main:app --host 0.0.0.0 --port 8000
+      "
+
+volumes:
+  ollama_models:
+  postgres_data:
+
+networks:
+  rag-network:
+    driver: bridge  

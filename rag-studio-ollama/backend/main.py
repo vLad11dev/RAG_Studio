@@ -42,7 +42,8 @@ app = FastAPI(
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080", "http://localhost:80"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -78,6 +79,7 @@ class HealthResponse(BaseModel):
     status: str
     ollama_status: str
     models_available: List[str]
+    embedding_model: Optional[Dict] = None
 
 class DocumentStatus(BaseModel):
     id: str
@@ -138,6 +140,9 @@ class StatsResponse(BaseModel):
     processed_documents: int
     total_chunks: int
 
+class EmbeddingModelChangeRequest(BaseModel):
+    model_name: str
+
 # Зависимости
 async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
@@ -162,23 +167,29 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
 
 # Инициализация компонентов RAG
 try:
-    embedding_model = EmbeddingModel()
+    # Используем современную модель для русского языка
+    embedding_model = EmbeddingModel(model_name="multilingual")
     vector_db = VectorDatabase(embedding_model)
     document_chunker = DocumentChunker()
     rag_chain = RAGChain()
-    logger.info("✅ RAG компоненты инициализированы")
+    logger.info("✅ RAG компоненты инициализированы с современной моделью эмбеддингов")
+    
 except Exception as e:
     logger.error(f"❌ Ошибка инициализации RAG компонентов: {e}")
-    embedding_model = None
-    vector_db = None
-    document_chunker = None
-    rag_chain = None
+    # Fallback на базовую модель
+    embedding_model = EmbeddingModel(model_name="fast")
+    vector_db = VectorDatabase(embedding_model)
+    document_chunker = DocumentChunker()
+    rag_chain = RAGChain()
+    logger.info("✅ RAG компоненты инициализированы с fallback моделью")
 
 @app.on_event("startup")
 async def startup_event():
     logger.info("✅ Приложение запущено")
     # Создаем необходимые директории
     os.makedirs("data/uploaded_files", exist_ok=True)
+    os.makedirs("models/cache", exist_ok=True)
+    os.makedirs("data/chroma_db", exist_ok=True)
 
 # 🔐 ЭНДПОИНТЫ АУТЕНТИФИКАЦИИ
 
@@ -195,60 +206,85 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
             detail="Пользователь с таким именем или email уже существует"
         )
     
-    # Создаем пользователя
-    hashed_password = get_password_hash(user_data.password)
-    user = User(
-        username=user_data.username,
-        email=user_data.email,
-        hashed_password=hashed_password,
-        full_name=user_data.full_name
-    )
+    # Отладочная информация
+    logger.info(f"Регистрация пользователя: {user_data.username}")
+    logger.info(f"Длина пароля в символах: {len(user_data.password)}")
+    logger.info(f"Длина пароля в байтах: {len(user_data.password.encode('utf-8'))}")
     
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    try:
+        # Создаем пользователя
+        hashed_password = get_password_hash(user_data.password)
+        user = User(
+            username=user_data.username,
+            email=user_data.email,
+            hashed_password=hashed_password,
+            full_name=user_data.full_name
+        )
+        
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        
+        # Создаем дефолтную коллекцию для пользователя
+        default_collection = Collection(
+            name="Моя коллекция",
+            description="Основная коллекция документов",
+            user_id=user.id
+        )
+        db.add(default_collection)
+        db.commit()
+        
+        # Создаем токен
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": str(user.id)}, expires_delta=access_token_expires
+        )
+        
+        user_response = UserResponse(
+            id=user.id,
+            username=user.username,
+            email=user.email,
+            full_name=user.full_name,
+            is_active=user.is_active,
+            created_at=user.created_at
+        )
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": user_response
+        }
     
-    # Создаем дефолтную коллекцию для пользователя
-    default_collection = Collection(
-        name="Моя коллекция",
-        description="Основная коллекция документов",
-        user_id=user.id
-    )
-    db.add(default_collection)
-    db.commit()
-    
-    # Создаем токен
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": str(user.id)}, expires_delta=access_token_expires
-    )
-    
-    user_response = UserResponse(
-        id=user.id,
-        username=user.username,
-        email=user.email,
-        full_name=user.full_name,
-        is_active=user.is_active,
-        created_at=user.created_at
-    )
-    
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": user_response
-    }
+    except Exception as e:
+        logger.error(f"Ошибка при регистрации: {str(e)}")
+        logger.error(f"Тип ошибки: {type(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка при регистрации: {str(e)}"
+        )
 
 @app.post("/api/auth/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == form_data.username).first()
+async def login(login_data: UserLogin, db: Session = Depends(get_db)):
+    logger.info(f"🔐 Попытка входа пользователя: {login_data.username}")
     
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    user = db.query(User).filter(User.username == login_data.username).first()
+    
+    if not user:
+        logger.warning(f"⚠️ Пользователь не найден: {login_data.username}")
+        raise HTTPException(
+            status_code=400,
+            detail="Неверное имя пользователя или пароль"
+        )
+    
+    if not verify_password(login_data.password, user.hashed_password):
+        logger.warning(f"⚠️ Неверный пароль для пользователя: {login_data.username}")
         raise HTTPException(
             status_code=400,
             detail="Неверное имя пользователя или пароль"
         )
     
     if not user.is_active:
+        logger.warning(f"⚠️ Пользователь неактивен: {login_data.username}")
         raise HTTPException(status_code=400, detail="Пользователь неактивен")
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -264,6 +300,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
         is_active=user.is_active,
         created_at=user.created_at
     )
+    
+    logger.info(f"✅ Пользователь {login_data.username} успешно вошел в систему")
     
     return {
         "access_token": access_token,
@@ -284,6 +322,36 @@ async def get_current_user_info(current_user: User = Depends(get_current_active_
 
 # 🔒 ЗАЩИЩЕННЫЕ ЭНДПОИНТЫ
 
+@app.get("/api/public/health", response_model=HealthResponse)
+async def public_health_check():
+    """Публичная проверка здоровья (без аутентификации)"""
+    try:
+        if rag_chain is None:
+            return HealthResponse(
+                status="degraded",
+                ollama_status="error: RAG components not initialized",
+                models_available=[],
+                embedding_model=None
+            )
+        
+        ollama_status = await rag_chain.check_ollama_health()
+        models = await rag_chain.get_available_models()
+        embedding_info = embedding_model.get_model_info() if embedding_model else None
+        
+        return HealthResponse(
+            status="healthy",
+            ollama_status=ollama_status,
+            models_available=models,
+            embedding_model=embedding_info
+        )
+    except Exception as e:
+        return HealthResponse(
+            status="degraded", 
+            ollama_status=f"error: {str(e)}",
+            models_available=[],
+            embedding_model=None
+        )
+
 @app.get("/api/health", response_model=HealthResponse)
 async def health_check(current_user: User = Depends(get_current_active_user)):
     try:
@@ -291,22 +359,33 @@ async def health_check(current_user: User = Depends(get_current_active_user)):
             return HealthResponse(
                 status="degraded",
                 ollama_status="error: RAG components not initialized",
-                models_available=[]
+                models_available=[],
+                embedding_model=None
             )
         
         ollama_status = await rag_chain.check_ollama_health()
         models = await rag_chain.get_available_models()
+        embedding_info = embedding_model.get_model_info() if embedding_model else None
+        
+        # Получаем статистику векторной БД
+        try:
+            vector_stats = await vector_db.get_collection_stats()
+            logger.info(f"📊 Статистика векторной БД: {vector_stats}")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось получить статистику векторной БД: {e}")
         
         return HealthResponse(
             status="healthy",
             ollama_status=ollama_status,
-            models_available=models
+            models_available=models,
+            embedding_model=embedding_info
         )
     except Exception as e:
         return HealthResponse(
             status="degraded", 
             ollama_status=f"error: {str(e)}",
-            models_available=[]
+            models_available=[],
+            embedding_model=None
         )
 
 @app.get("/api/models")
@@ -318,6 +397,51 @@ async def get_models(current_user: User = Depends(get_current_active_user)):
         return {"models": models}
     except Exception as e:
         return {"models": ["llama3:8b"]}
+
+# 📄 УПРАВЛЕНИЕ МОДЕЛЯМИ ЭМБЕДДИНГОВ
+
+@app.get("/api/embedding/models")
+async def get_embedding_models(current_user: User = Depends(get_current_active_user)):
+    """Получить доступные модели эмбеддингов"""
+    models = [
+        {"name": "multilingual", "description": "Лучшая для русского языка (E5)"},
+        {"name": "russian", "description": "Специализированная для русского (LaBSE)"},
+        {"name": "modern", "description": "Современная SOTA модель (BGE-M3)"},
+        {"name": "balanced", "description": "Сбалансированная (GTE)"},
+        {"name": "fast", "description": "Быстрая (MiniLM)"}
+    ]
+    current_model = embedding_model.get_model_info() if embedding_model else None
+    return {
+        "available_models": models, 
+        "current_model": current_model,
+        "vector_db_status": "active"
+    }
+
+@app.post("/api/embedding/models/change")
+async def change_embedding_model(
+    model_data: EmbeddingModelChangeRequest,
+    current_user: User = Depends(get_current_active_user)
+):
+    """Сменить модель эмбеддингов"""
+    try:
+        new_model = model_data.model_name
+        
+        logger.info(f"🔄 Смена модели эмбеддингов на: {new_model}")
+        
+        # Создаем новую модель
+        global embedding_model, vector_db
+        embedding_model = EmbeddingModel(model_name=new_model)
+        vector_db = VectorDatabase(embedding_model)
+        
+        return {
+            "message": f"Модель эмбеддингов изменена на {new_model}",
+            "model_info": embedding_model.get_model_info(),
+            "status": "success"
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ Ошибка смены модели: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка смены модели: {str(e)}")
 
 # 📄 CRUD ДОКУМЕНТОВ
 
@@ -400,8 +524,9 @@ async def upload_document(
 
 async def process_document_background(file_path: str, document_id: str, filename: str, user_id: int, db: Session):
     try:
+        logger.info(f"🔄 Начало обработки документа: {filename}")
+        
         if document_chunker is None or vector_db is None:
-            # Обновляем в БД
             db.query(Document).filter(Document.document_id == document_id).update({
                 "status": "error",
                 "error": "RAG components not available"
@@ -409,8 +534,41 @@ async def process_document_background(file_path: str, document_id: str, filename
             db.commit()
             return
             
+        # Чанкинг документа
+        logger.info(f"🔪 Чанкинг документа: {filename}")
         chunks = document_chunker.chunk_document(file_path)
+        logger.info(f"📊 Получено чанков: {len(chunks)}")
+        
+        # ДЕТАЛЬНАЯ ИНФОРМАЦИЯ О ЧАНКАХ
+        if chunks:
+            total_words = sum(len(chunk['text'].split()) for chunk in chunks)
+            avg_words = total_words / len(chunks)
+            logger.info(f"📝 Детали чанков: всего слов {total_words}, средний размер {avg_words:.1f} слов/чанк")
+            
+            # Логируем первые 3 чанка для отладки
+            for i, chunk in enumerate(chunks[:3]):
+                chunk_text = chunk['text']
+                words_count = len(chunk_text.split())
+                logger.info(f"   Чанк {i+1}: {words_count} слов, начало: {chunk_text[:100]}...")
+        else:
+            logger.error("❌ Чанкинг не создал ни одного чанка!")
+            db.query(Document).filter(Document.document_id == document_id).update({
+                "status": "error",
+                "error": "Чанкинг не создал чанки"
+            })
+            db.commit()
+            return
+        
+        # Индексация в векторной БД
+        logger.info(f"🔢 Индексация {len(chunks)} чанков в векторной БД: {filename}")
         await vector_db.index_document(chunks, document_id, filename)
+        
+        # Проверяем, что чанки действительно добавились
+        try:
+            actual_chunks = await vector_db.get_document_chunks_count(document_id)
+            logger.info(f"✅ В векторную БД добавлено {actual_chunks} чанков")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось проверить количество чанков в БД: {e}")
         
         # Обновляем в БД
         db.query(Document).filter(Document.document_id == document_id).update({
@@ -423,13 +581,12 @@ async def process_document_background(file_path: str, document_id: str, filename
         logger.info(f"✅ Документ {filename} обработан, чанков: {len(chunks)}")
         
     except Exception as e:
-        # Обновляем в БД
+        logger.error(f"❌ Ошибка обработки {filename}: {str(e)}")
         db.query(Document).filter(Document.document_id == document_id).update({
             "status": "error",
             "error": str(e)
         })
         db.commit()
-        logger.error(f"❌ Ошибка обработки {filename}: {str(e)}")
 
 @app.get("/api/documents", response_model=List[DocumentStatus])
 async def get_user_documents(
@@ -467,6 +624,15 @@ async def get_document_status(
     
     if not document:
         raise HTTPException(status_code=404, detail="Документ не найден")
+    
+    # Получаем актуальную статистику из векторной БД
+    vector_stats = {}
+    try:
+        if vector_db:
+            vector_stats = await vector_db.get_document_stats(document_id)
+            logger.info(f"📊 Статистика документа {document_id}: {vector_stats}")
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось получить статистику из векторной БД: {e}")
     
     return DocumentStatus(
         id=document.document_id,
@@ -668,6 +834,14 @@ async def delete_collection(
     if collections_count <= 1:
         raise HTTPException(status_code=400, detail="Нельзя удалить последнюю коллекцию")
     
+    # Удаляем документы коллекции из векторной БД
+    for document in collection.documents:
+        try:
+            if vector_db:
+                await vector_db.delete_document(document.document_id)
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка удаления документа {document.document_id} из векторной БД: {e}")
+    
     db.delete(collection)
     db.commit()
     
@@ -719,7 +893,6 @@ async def ask_question(
         
         collection_id = request.collection_id
         if not collection_id:
-            # Используем первую коллекцию пользователя
             default_collection = db.query(Collection).filter(
                 Collection.user_id == current_user.id
             ).first()
@@ -729,7 +902,6 @@ async def ask_question(
             
             collection_id = default_collection.id
         
-        # Получаем коллекцию
         collection = db.query(Collection).filter(
             Collection.id == collection_id,
             Collection.user_id == current_user.id
@@ -738,34 +910,98 @@ async def ask_question(
         if not collection:
             raise HTTPException(status_code=404, detail="Коллекция не найдена")
         
-        # Получаем документы коллекции
         collection_docs = [doc.document_id for doc in collection.documents if doc.status == "processed"]
         
         if not collection_docs:
             raise HTTPException(status_code=400, detail="В коллекции нет обработанных документов")
         
-        # Ищем релевантные чанки
-        all_relevant_chunks = []
+        logger.info(f"🔍 Поиск в {len(collection_docs)} документах коллекции {collection_id}")
         
-        for document_id in collection_docs:
-            try:
-                chunks = await vector_db.search(request.question, document_id, n_results=2)
-                all_relevant_chunks.extend(chunks)
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка поиска в документе {document_id}: {e}")
-                continue
+        # АДАПТИВНЫЙ ПОИСК
+        total_chunks_in_collection = 0
+        valid_docs = []
         
-        if not all_relevant_chunks:
+        # Проверяем каждый документ на наличие чанков
+        for doc_id in collection_docs:
+            doc_chunks = await vector_db.get_document_chunks_count(doc_id)
+            logger.info(f"📊 Документ {doc_id}: {doc_chunks} чанков")
+            
+            if doc_chunks > 0:
+                total_chunks_in_collection += doc_chunks
+                valid_docs.append(doc_id)
+        
+        logger.info(f"📈 Всего чанков в коллекции: {total_chunks_in_collection}")
+        
+        # Если нет чанков, возвращаем ошибку
+        if total_chunks_in_collection == 0:
+            logger.warning("⚠️ В коллекции нет чанков для поиска")
             return AskQuestionResponse(
-                answer="Не найдено релевантной информации в документах коллекции для ответа на вопрос.",
+                answer="В коллекции нет индексированных данных для поиска. Пожалуйста, переиндексируйте документы.",
                 sources=[],
                 collection_id=collection_id,
                 processing_time=0
             )
         
-        # Сортируем по релевантности и берем топ-5
-        all_relevant_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
-        top_chunks = all_relevant_chunks[:5]
+        # УМНОЕ ВЫБОР n_results и score_threshold
+        if total_chunks_in_collection <= 10:
+            n_results = min(8, total_chunks_in_collection)  # Используем больше чанков
+            score_threshold = 0.2  # ОЧЕНЬ НИЗКИЙ порог для маленьких коллекций
+            logger.info(f"🎯 Мало чанков: n_results={n_results}, score_threshold={score_threshold}")
+        else:
+            n_results = 6
+            score_threshold = 0.3  # Нормальный порог
+            logger.info(f"🎯 Нормальное количество чанков: n_results={n_results}, score_threshold={score_threshold}")
+        
+        # ИСПОЛЬЗУЕМ УЛУЧШЕННЫЙ ПОИСК
+        all_relevant_chunks = []
+        for doc_id in valid_docs:
+            try:
+                chunks = await vector_db.search(
+                    query=request.question,
+                    document_id=doc_id,
+                    n_results=n_results,
+                    score_threshold=score_threshold
+                )
+                all_relevant_chunks.extend(chunks)
+                logger.info(f"📄 В документе {doc_id} найдено {len(chunks)} релевантных чанков")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка поиска в документе {doc_id}: {e}")
+                continue
+        
+        # Сортируем все результаты по релевантности
+        all_relevant_chunks.sort(key=lambda x: x["score"], reverse=True)
+        
+        # Берем топ чанки - УВЕЛИЧИВАЕМ количество для контекста
+        if all_relevant_chunks:
+            # Используем больше чанков для лучшего контекста
+            top_chunks = all_relevant_chunks[:min(8, len(all_relevant_chunks))]
+            logger.info(f"✅ Найдено {len(top_chunks)} релевантных чанков, лучший score: {top_chunks[0]['score']:.3f}")
+            
+            # Детальное логирование чанков
+            logger.info("📋 Топ чанки:")
+            for i, chunk in enumerate(top_chunks):
+                score = chunk.get("score", 0)
+                doc_name = chunk.get("metadata", {}).get("document_name", "Unknown")
+                text_preview = chunk["text"][:100] + "..." if len(chunk["text"]) > 100 else chunk["text"]
+                logger.info(f"   {i+1}. Score: {score:.3f}, Док: {doc_name}")
+                logger.info(f"      Текст: {text_preview}")
+        else:
+            top_chunks = []
+            logger.warning(f"❌ Не найдено релевантных чанков для вопроса: '{request.question}'")
+            
+            # Дополнительная диагностика
+            logger.info("🔍 Диагностика поиска:")
+            logger.info(f"   Коллекция: {collection_id}, документов: {len(valid_docs)}")
+            logger.info(f"   Всего чанков: {total_chunks_in_collection}")
+            logger.info(f"   Параметры: n_results={n_results}, score_threshold={score_threshold}")
+        
+        if not top_chunks:
+            return AskQuestionResponse(
+                answer="В текущих документах не найдено информации для ответа на этот вопрос. Попробуйте переформулировать запрос или добавьте больше документов в коллекцию.",
+                sources=[],
+                collection_id=collection_id,
+                processing_time=0
+            )
         
         # Генерируем ответ
         answer = await rag_chain.generate_answer(
@@ -777,11 +1013,10 @@ async def ask_question(
         )
         
         sources = list(set([
-            chunk.get("metadata", {}).get("source", "Документ")
+            chunk.get("metadata", {}).get("document_name", "Документ")
             for chunk in top_chunks
         ]))
         
-        # Вычисляем время обработки
         processing_time = int((datetime.utcnow() - start_time).total_seconds() * 1000)
         
         # Сохраняем в историю чата
@@ -796,7 +1031,7 @@ async def ask_question(
         db.add(chat_history)
         db.commit()
         
-        logger.info(f"💬 Пользователь {current_user.username} задал вопрос в коллекции {collection_id}, время обработки: {processing_time}ms")
+        logger.info(f"💬 Ответ сгенерирован, время обработки: {processing_time}ms")
         
         return AskQuestionResponse(
             answer=answer,
@@ -808,6 +1043,20 @@ async def ask_question(
     except Exception as e:
         logger.error(f"❌ Ошибка при обработке вопроса: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка при обработке вопроса: {str(e)}")
+
+@app.post("/api/debug/embedding-test")
+async def debug_embedding_test(
+    document_id: str = Form(...),
+    query: str = Form("Что делает команда kill"),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Диагностика эмбеддингов"""
+    try:
+        await vector_db.test_embedding_similarity(query, document_id)
+        return {"message": "Диагностика завершена, проверьте логи"}
+    except Exception as e:
+        logger.error(f"❌ Ошибка диагностики: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка диагностики: {str(e)}")
 
 # 📊 ИСТОРИЯ ЧАТА И СТАТИСТИКА
 
@@ -903,7 +1152,14 @@ async def root():
     return {
         "message": "RAG Studio API",
         "version": "1.0.0",
-        "docs": "/docs"
+        "docs": "/docs",
+        "features": [
+            "Modern embedding models",
+            "Vector search with ChromaDB", 
+            "Document processing",
+            "RAG question answering",
+            "User management"
+        ]
     }
 
 if __name__ == "__main__":

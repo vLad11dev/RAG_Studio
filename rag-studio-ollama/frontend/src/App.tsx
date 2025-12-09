@@ -6,7 +6,19 @@ import UploadZone from './components/UploadZone';
 import DocumentTable from './components/DocumentTable';
 import Chat from './components/Chat';
 import Login from './components/Login';
-import { getHealth, getModels, uploadDocumentWithProgress, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments, getCurrentUser, getStoredUser, setStoredUser, removeAuthToken } from './services/api';
+import { 
+  getHealth, 
+  getModels, 
+  uploadDocument, 
+  askCollectionQuestion, 
+  deleteDocument, 
+  getDocumentStatus, 
+  createCollection, 
+  getCollectionDocuments, 
+  getStoredUser, 
+  removeAuthToken,
+  api
+} from './services/api';
 import { DocumentStatus, HealthResponse, Collection, ChatMessage } from './types';
 
 // Компонент для кастомного select
@@ -87,16 +99,18 @@ const CustomSelect: React.FC<CustomSelectProps> = ({
   );
 };
 
-function App() {
-  type UiDoc = { 
-    id: string; 
-    filename: string; 
-    status: DocumentStatus['status']; 
-    chunks_count?: number; 
-    error?: string;
-    progress?: number;
-  };
+// Тип для UI документа с прогрессом
+type UiDoc = DocumentStatus & { 
+  progress?: number;
+};
 
+// Функция для преобразования API документа в UiDoc
+const apiDocToUiDoc = (doc: any): UiDoc => ({
+  ...doc,
+  progress: doc.status === 'processing' ? 0 : undefined
+});
+
+function App() {
   // Состояния для аутентификации
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
@@ -124,22 +138,18 @@ function App() {
 
   // Проверка аутентификации при загрузке
   useEffect(() => {
-    const checkAuth = async () => {
+    const checkAuth = () => {
       try {
-        // Проверяем, есть ли сохраненный пользователь
         const storedUser = getStoredUser();
-        if (storedUser) {
+        const token = localStorage.getItem('auth_token') || localStorage.getItem('access_token');
+        
+        if (storedUser && token) {
           setCurrentUser(storedUser);
           setIsAuthenticated(true);
         } else {
-          // Пробуем получить текущего пользователя с сервера
-          const response = await getCurrentUser();
-          setCurrentUser(response.data);
-          setStoredUser(response.data);
-          setIsAuthenticated(true);
+          setIsAuthenticated(false);
         }
       } catch (error) {
-        // Если ошибка 401 или другая - пользователь не авторизован
         setIsAuthenticated(false);
       } finally {
         setIsAuthChecking(false);
@@ -150,43 +160,56 @@ function App() {
   }, []);
 
   // Функции для аутентификации
-  const handleLoginSuccess = (user: any) => {
+  const handleLoginSuccess = React.useCallback((user: any) => {
     setCurrentUser(user);
     setIsAuthenticated(true);
     toast.success(`Добро пожаловать, ${user.username}!`);
-  };
+  }, []);
 
-  const handleLogout = () => {
+  const handleLogout = React.useCallback(() => {
     removeAuthToken();
     setCurrentUser(null);
     setIsAuthenticated(false);
+    setDocuments([]);
+    setCollections([]);
+    setActiveCollectionId(null);
     toast.success('Вы вышли из системы');
-  };
+  }, []);
 
   // Загрузка документов коллекции
   const loadCollectionDocuments = async (collectionId: string) => {
     try {
       const response = await getCollectionDocuments(collectionId);
-      const docs = response.data;
+      const docs = response.data.map((doc: any) => apiDocToUiDoc(doc));
       setDocuments(prev => {
         const existingIds = new Set(prev.map(d => d.id));
-        const newDocs = docs.filter((doc: any) => !existingIds.has(doc.id));
+        const newDocs = docs.filter(doc => !existingIds.has(doc.id));
         return [...prev, ...newDocs];
       });
     } catch (error) {
-      console.error('Ошибка загрузки документов коллекции:', error);
+      console.error('Ошибка загрузки документов коллекции', error);
     }
   };
 
-  // Инициализация приложения
+  // Инициализация приложения - только если авторизован
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated) {
+      return;
+    }
 
     const init = async () => {
       try {
-        const healthRes = await getHealth();
-        const health: HealthResponse = healthRes.data;
-        setOllamaStatus(health.ollama_status);
+        // Используем публичный health check если есть, иначе обычный
+        try {
+          const healthRes = await api.get<HealthResponse>('/public/health');
+          const health = healthRes.data;
+          setOllamaStatus(health.ollama_status);
+        } catch {
+          // Если публичного нет, используем защищенный
+          const healthRes = await getHealth();
+          const health: HealthResponse = healthRes.data;
+          setOllamaStatus(health.ollama_status);
+        }
 
         const modelsRes = await getModels();
         const modelList: string[] = modelsRes.data.models;
@@ -196,15 +219,19 @@ function App() {
         toast.success('Система готова к работе');
       } catch (err) {
         setOllamaStatus('error');
+        console.error('Initialization error', err);
         toast.error('Ошибка подключения к серверу');
       }
     };
+    
     init();
   }, [isAuthenticated]);
 
   // Коллекции из localStorage
   useEffect(() => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated) {
+      return;
+    }
 
     try {
       const raw = localStorage.getItem('rag.collections');
@@ -217,6 +244,7 @@ function App() {
         }
       }
     } catch (error) {
+      console.error('Ошибка загрузки коллекций', error);
       toast.error('Ошибка загрузки коллекций');
     }
   }, [isAuthenticated]);
@@ -228,6 +256,7 @@ function App() {
     try {
       localStorage.setItem('rag.collections', JSON.stringify(collections));
     } catch (error) {
+      console.error('Ошибка сохранения коллекций', error);
       toast.error('Ошибка сохранения коллекций');
     }
   }, [collections, isAuthenticated]);
@@ -245,44 +274,47 @@ function App() {
         toast.error('Название коллекции обязательно');
         return;
       }
-      const cid = crypto.randomUUID();
-      await handleCreateCollection(cid, name);
+      try {
+        await handleCreateCollection(name);
+      } catch (error) {
+        toast.error('Ошибка создания коллекции');
+        return;
+      }
     }
 
     for (const file of files) {
       try {
         const tempId = `temp-${crypto.randomUUID()}`;
-        setDocuments(prev => [...prev, { 
-          id: tempId, 
-          filename: file.name, 
-          status: 'processing', 
-          progress: 0 
-        }]);
+        const tempDoc: UiDoc = {
+          id: tempId,
+          filename: file.name,
+          status: 'processing',
+          progress: 0,
+          created_at: new Date().toISOString()
+        };
+        
+        console.log('📤 Creating temp document:', tempId);
+        setDocuments(prev => [...prev, tempDoc]);
 
-        let lastProgress = 0;
-        const res = await uploadDocumentWithProgress(
-          file, 
-          (p: number) => {
-            if (p !== lastProgress) {
-              lastProgress = p;
-              setDocuments(prev => prev.map(d => 
-                d.id === tempId ? { ...d, progress: p } : d
-              ));
-            }
-          },
-          activeCollectionId || 'default'
-        );
+        // Используем простую загрузку без прогресса
+        const res = await uploadDocument(file, activeCollectionId || undefined);
 
         const { document_id } = res.data;
         
-        setDocuments(prev => prev.map(d => 
-          d.id === tempId ? { 
-            id: document_id, 
-            filename: file.name, 
-            status: 'processing' 
-          } : d
-        ));
+        console.log('📥 Upload response - real document_id:', document_id);
+        
+        setDocuments(prev => {
+          const updated = prev.map(d => 
+            d.id === tempId ? { 
+              ...d,
+              id: document_id  // Обновляем на реальный ID
+            } : d
+          );
+          console.log('🔄 Documents after update:', updated);
+          return updated;
+        });
 
+        // Обновляем коллекции
         setCollections(prev => prev.map(c => 
           c.id === activeCollectionId 
             ? { ...c, docIds: [...c.docIds, document_id] } 
@@ -291,13 +323,15 @@ function App() {
 
         toast.success(`Файл "${file.name}" загружен`);
         
+        // Загружаем документы коллекции через некоторое время
         setTimeout(() => {
           if (activeCollectionId) {
             loadCollectionDocuments(activeCollectionId);
           }
         }, 2000);
 
-      } catch (err) {
+      } catch (err: any) {
+        console.error('Upload error', err);
         toast.error(`Ошибка загрузки файла: ${file.name}`);
         setDocuments(prev => prev.filter(d => !d.id.startsWith('temp-')));
       }
@@ -313,73 +347,88 @@ function App() {
 
   // Отправка сообщения в чат
   const handleSendMessage = async (message: string) => {
-    if (!isAuthenticated) {
-      toast.error('Необходима авторизация');
-      return;
-    }
+  if (!isAuthenticated) {
+    toast.error('Необходима авторизация');
+    return;
+  }
 
-    if (!activeCollection || !selectedModel || !activeCollectionId) {
-      toast.error('Выберите коллекцию и модель для чата');
-      return;
-    }
+  if (!activeCollection || !selectedModel || !activeCollectionId) {
+    toast.error('Выберите коллекцию и модель для чата');
+    return;
+  }
 
-    const userMessage: ChatMessage = {
+  console.log('🔍 Debug - отправка запроса:', {
+    message,
+    collectionId: activeCollectionId,
+    collectionIdType: typeof activeCollectionId,
+    model: selectedModel
+  });
+
+  const userMessage: ChatMessage = {
+    id: crypto.randomUUID(),
+    role: 'user',
+    content: message,
+    timestamp: Date.now(),
+  };
+
+  setCollections(prev => prev.map(c => 
+    c.id === activeCollectionId 
+      ? { ...c, chatHistory: [...c.chatHistory, userMessage] }
+      : c
+  ));
+
+  setIsAsking(true);
+
+  try {
+    console.log('🚀 Отправка запроса к /api/ask...');
+    
+    // ИСПРАВЛЕНИЕ: преобразуем строку в число
+    const res = await askCollectionQuestion({
+      question: message,
+      collection_id: parseInt(activeCollectionId), // ← ВОТ ЭТО ИСПРАВЛЕНИЕ
+      model: selectedModel,
+      temperature: 0.3,
+      max_tokens: 1000
+    });
+
+    console.log('✅ Ответ от сервера:', res.data);
+
+    const assistantMessage: ChatMessage = {
       id: crypto.randomUUID(),
-      role: 'user',
-      content: message,
+      role: 'assistant',
+      content: res.data.answer,
+      sources: res.data.sources || [],
       timestamp: Date.now(),
     };
 
     setCollections(prev => prev.map(c => 
       c.id === activeCollectionId 
-        ? { ...c, chatHistory: [...c.chatHistory, userMessage] }
+        ? { ...c, chatHistory: [...c.chatHistory, assistantMessage] }
         : c
     ));
 
-    setIsAsking(true);
+  } catch (err: any) {
+    console.error('❌ Ошибка чата:', err);
+    console.error('❌ Детали ошибки:', err.response?.data);
+    
+    const errorMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: `Ошибка: ${err.response?.data?.detail || err.message}`,
+      timestamp: Date.now(),
+    };
 
-    try {
-      const res = await askCollectionQuestion({
-        question: message,
-        collection_id: activeCollectionId,
-        model: selectedModel,
-        temperature: 0.3,
-        max_tokens: 1000
-      });
+    setCollections(prev => prev.map(c => 
+      c.id === activeCollectionId 
+        ? { ...c, chatHistory: [...c.chatHistory, errorMessage] }
+        : c
+    ));
 
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: res.data.answer,
-        sources: res.data.sources,
-        timestamp: Date.now(),
-      };
-
-      setCollections(prev => prev.map(c => 
-        c.id === activeCollectionId 
-          ? { ...c, chatHistory: [...c.chatHistory, assistantMessage] }
-          : c
-      ));
-
-    } catch (err: any) {
-      const errorMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: `Ошибка: ${err.response?.data?.detail || err.message}`,
-        timestamp: Date.now(),
-      };
-
-      setCollections(prev => prev.map(c => 
-        c.id === activeCollectionId 
-          ? { ...c, chatHistory: [...c.chatHistory, errorMessage] }
-          : c
-      ));
-
-      toast.error('Ошибка при получении ответа');
-    } finally {
-      setIsAsking(false);
-    }
-  };
+    toast.error('Ошибка при получении ответа');
+  } finally {
+    setIsAsking(false);
+  }
+};
 
   // Управление документами
   const handleDelete = async (id: string) => {
@@ -403,7 +452,8 @@ function App() {
         return copy;
       });
       toast.success('Документ удалён');
-    } catch (error) {
+    } catch (error: any) {
+      console.error('Delete document error', error);
       toast.error('Ошибка удаления документа');
     }
   };
@@ -422,7 +472,7 @@ function App() {
       try { 
         await deleteDocument(id); 
       } catch (error) {
-        console.error(`Ошибка удаления документа ${id}:`, error);
+        console.error(`Ошибка удаления документа ${id}`, error);
       }
     }
 
@@ -460,34 +510,34 @@ function App() {
   };
 
   // Управление коллекциями
-  const handleCreateCollection = async (id?: string, name?: string) => {
+  const handleCreateCollection = async (name: string) => {
     if (!isAuthenticated) {
       toast.error('Необходима авторизация');
       return;
     }
 
-    const collectionName = name || window.prompt('Название новой коллекции:');
-    if (!collectionName) {
+    if (!name) {
       toast.error('Название коллекции обязательно');
       return;
     }
-    const collectionId = id || crypto.randomUUID();
     
     try {
-      await createCollection({ id: collectionId, name: collectionName });
+      const response = await createCollection({ name });
+      const newCollection = response.data;
       
-      const newCollection: Collection = { 
-        id: collectionId, 
-        name: collectionName, 
+      setCollections(prev => [...prev, { 
+        id: newCollection.id.toString(),
+        name: newCollection.name, 
         docIds: [], 
         chatHistory: [], 
         createdAt: Date.now() 
-      };
-      setCollections(prev => [...prev, newCollection]);
-      setActiveCollectionId(collectionId);
-      toast.success(`Коллекция "${collectionName}" создана`);
-    } catch (error) {
+      }]);
+      setActiveCollectionId(newCollection.id.toString());
+      toast.success(`Коллекция "${newCollection.name}" создана`);
+    } catch (error: any) {
+      console.error('Create collection error', error);
       toast.error('Ошибка создания коллекции');
+      throw error;
     }
   };
 
@@ -541,7 +591,7 @@ function App() {
       try { 
         await deleteDocument(docId); 
       } catch (error) {
-        console.error(`Ошибка удаления документа ${docId}:`, error);
+        console.error(`Ошибка удаления документа ${docId}`, error);
       }
     }
 
@@ -555,43 +605,49 @@ function App() {
     toast.success(`Коллекция "${collection.name}" удалена`);
   };
 
-  // Обновление статусов документов
+  // Обновление статусов документов - ИСПРАВЛЕННАЯ ВЕРСИЯ
   useEffect(() => {
-    if (documents.length === 0 || !isAuthenticated) return;
-  
-    const tick = async () => {
-      const updates: UiDoc[] = await Promise.all(
-        documents.map(async (doc) => {
-          if (doc.status === 'processed' || doc.status === 'error') return doc;
+  if (documents.length === 0 || !isAuthenticated) return;
+
+  console.log('🔄 Status check triggered, documents:', documents);
+
+  const tick = async () => {
+    const updates: UiDoc[] = await Promise.all(
+      documents.map(async (doc) => {
+        console.log('📊 Checking status for:', doc.id, doc.filename);
+        
+        // Пропускаем временные ID и уже обработанные документы
+        if (doc.id.startsWith('temp-') || doc.status === 'processed' || doc.status === 'error') {
+          return doc;
+        }
+        
+        try {
+          const res = await getDocumentStatus(doc.id);
+          const s = res.data as any;
+          console.log('✅ Status response for', doc.id, ':', s.status);
           
-          try {
-            const res = await getDocumentStatus(doc.id);
-            const s: DocumentStatus = res.data;
-            
-            return {
-              id: doc.id,
-              filename: doc.filename,
-              status: s.status,
-              chunks_count: s.chunks_count,
-              error: s.error,
-              progress: doc.progress
-            };
-          } catch {
+          return apiDocToUiDoc(s);
+        } catch (error: any) {  // ← ИСПРАВЛЕНО: добавлен тип any
+          console.error('❌ Status check failed for', doc.id, error);
+          // Если ошибка 404 и это реальный ID (не временный), помечаем как ошибку
+          if (error.response?.status === 404 && !doc.id.startsWith('temp-')) {
             return {
               ...doc,
               status: 'error',
-              error: 'Не удалось получить статус'
-            };
+              error: 'Документ не найден на сервере'
+            } as UiDoc;
           }
-        })
-      );
-      setDocuments(updates);
-    };
-  
-    const interval = setInterval(tick, 2000);
-    tick();
-    return () => clearInterval(interval);
-  }, [documents.length, isAuthenticated]);
+          return doc; // Возвращаем документ без изменений при других ошибках
+        }
+      })
+    );
+    setDocuments(updates);
+  };
+
+  const interval = setInterval(tick, 2000);
+  tick();
+  return () => clearInterval(interval);
+}, [documents.length, isAuthenticated]);
 
   // Фильтрация документов активной коллекции
   const filteredDocuments = documents.filter(d => 
@@ -670,7 +726,10 @@ function App() {
               </div>
 
               <button
-                onClick={() => handleCreateCollection()}
+                onClick={() => {
+                  const name = window.prompt('Название новой коллекции:');
+                  if (name) handleCreateCollection(name);
+                }}
                 className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-all duration-200 transform hover:scale-105 flex items-center gap-1 shadow-sm hover:shadow-md"
               >
                 <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
