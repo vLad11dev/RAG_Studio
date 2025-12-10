@@ -12,26 +12,32 @@ class EmbeddingModel:
     и обработкой русского языка
     """
     
-    # Современные модели для лучшего качества
+    # Современные модели для лучшего качества С УКАЗАНИЕМ РАЗМЕРНОСТИ
     MODEL_CONFIGS = {
-        "multilingual": "intfloat/multilingual-e5-base",  # Лучшая для русского
-        "russian": "sentence-transformers/LaBSE",  # Специализированная для русского
-        "modern": "BAAI/bge-m3",  # Современная SOTA модель
-        "fast": "sentence-transformers/all-MiniLM-L6-v2",  # Быстрая
-        "balanced": "Alibaba-NLP/gte-multilingual-base"  # Сбалансированная
+        "multilingual": ("intfloat/multilingual-e5-base", 768),  # 768-мерная
+        "russian": ("sentence-transformers/LaBSE", 768),         # 768-мерная
+        "modern": ("BAAI/bge-m3", 768),                          # 768-мерная
+        "fast": ("sentence-transformers/all-MiniLM-L6-v2", 384), # 384-мерная
+        "balanced": ("Alibaba-NLP/gte-multilingual-base", 768),  # 768-мерная
+        "default": ("sentence-transformers/all-MiniLM-L6-v2", 384)  # 384-мерная ПО УМОЛЧАНИЮ
     }
     
-    def __init__(self, model_name: str = "multilingual", model_path: Optional[str] = None):
+    def __init__(self, model_name: str = "default", model_path: Optional[str] = None):  # ИЗМЕНИЛ на "default"
         self.model_name = model_name
         self.model_path = model_path
         self.model = None
+        self.embedding_dimension = 384  # Храним размерность - ИЗМЕНИЛ на 384
         self._load_model()
     
     def _load_model(self):
         """Загрузка модели с улучшенной обработкой ошибок"""
         try:
-            # Определяем путь к модели
-            actual_model_name = self.MODEL_CONFIGS.get(self.model_name, self.model_name)
+            # Определяем путь к модели и её размерность
+            if self.model_name in self.MODEL_CONFIGS:
+                actual_model_name, self.embedding_dimension = self.MODEL_CONFIGS[self.model_name]
+            else:
+                actual_model_name = self.model_name
+                self.embedding_dimension = 384  # По умолчанию 384
             
             if self.model_path and os.path.exists(self.model_path):
                 logger.info(f"🔢 Загрузка локальной модели: {self.model_path}")
@@ -40,16 +46,15 @@ class EmbeddingModel:
                 logger.info(f"🔢 Загрузка модели: {actual_model_name}")
                 self.model = SentenceTransformer(
                     actual_model_name,
-                    cache_folder="./models/cache",
-                    trust_remote_code=True  # Для современных моделей
+                    cache_folder="./models/cache"
                 )
             
-            # Тестируем модель
-            test_embedding = self.encode(["тестовый текст"])
-            embedding_dim = len(test_embedding[0])
+            # Определяем реальную размерность модели
+            if hasattr(self.model, 'get_sentence_embedding_dimension'):
+                self.embedding_dimension = self.model.get_sentence_embedding_dimension()
             
             logger.info(f"✅ Модель загружена: {actual_model_name}")
-            logger.info(f"📊 Размерность эмбеддингов: {embedding_dim}")
+            logger.info(f"📊 Размерность эмбеддингов: {self.embedding_dimension}")
             
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки модели: {e}")
@@ -58,6 +63,9 @@ class EmbeddingModel:
     def _create_fallback_model(self):
         """Создание заглушки для работы без интернета"""
         class FallbackModel:
+            def __init__(self, dimension=384):
+                self.dimension = dimension
+                
             def encode(self, texts, **kwargs):
                 import random
                 # Создаем детерминированные эмбеддинги на основе текста
@@ -66,7 +74,8 @@ class EmbeddingModel:
                     # Простой хэш для создания псевдо-случайного вектора
                     seed = sum(ord(c) for c in text) % 1000
                     random.seed(seed)
-                    embedding = [random.gauss(0, 1) for _ in range(384)]
+                    # Используем правильную размерность!
+                    embedding = [random.gauss(0, 1) for _ in range(self.dimension)]
                     # Нормализация
                     norm = sum(x*x for x in embedding) ** 0.5
                     embedding = [x/norm for x in embedding]
@@ -74,9 +83,10 @@ class EmbeddingModel:
                 return embeddings
             
             def get_sentence_embedding_dimension(self):
-                return 384
+                return self.dimension
         
-        self.model = FallbackModel()
+        # Передаем правильную размерность в FallbackModel
+        self.model = FallbackModel(dimension=self.embedding_dimension)
         logger.warning("⚠️ Используется fallback модель эмбеддингов")
     
     def encode(self, texts: List[str], batch_size: int = 32, **kwargs) -> List[List[float]]:
@@ -120,10 +130,6 @@ class EmbeddingModel:
         # Удаление лишних пробелов
         text = ' '.join(text.split())
         
-        # Для современных моделей можно добавить префиксы
-        if "e5" in self.model_name.lower():
-            text = f"query: {text}"  # E5 модели требуют префиксы
-        
         return text
     
     def get_model_info(self) -> dict:
@@ -133,20 +139,26 @@ class EmbeddingModel:
         
         info = {
             "model_name": self.model_name,
-            "embedding_dimension": 384,
+            "embedding_dimension": self.embedding_dimension,  # ИСПОЛЬЗУЕМ self.embedding_dimension!
             "max_sequence_length": 512,
             "is_fallback": not hasattr(self.model, 'get_sentence_embedding_dimension')
         }
         
         if not info["is_fallback"]:
             try:
+                # Обновляем из реальной модели
                 info["embedding_dimension"] = self.model.get_sentence_embedding_dimension()
                 info["max_sequence_length"] = self.model.get_max_seq_length()
-                info["actual_model"] = self.model[0].auto_model.config.name_or_path
+                if hasattr(self.model[0].auto_model, 'config'):
+                    info["actual_model"] = self.model[0].auto_model.config.name_or_path
             except:
                 pass
         
         return info
+    
+    def get_embedding_dimension(self) -> int:
+        """Возвращает размерность эмбеддингов"""
+        return self.embedding_dimension
     
     def change_model(self, new_model_name: str):
         """Смена модели на лету"""

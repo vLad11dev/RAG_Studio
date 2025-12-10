@@ -5,7 +5,7 @@ const API_BASE = '/api';
 // Создаем экземпляр axios
 export const api = axios.create({
   baseURL: API_BASE,
-  timeout: 10000,
+  timeout: 60000,
 });
 
 // Интерфейсы для TypeScript

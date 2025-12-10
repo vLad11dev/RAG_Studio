@@ -29,12 +29,49 @@ class VectorDatabase:
             )
         )
         
+        # Получаем информацию о модели эмбеддингов для определения размерности
+        try:
+            model_info = embedding_model.get_model_info()
+            embedding_dimension = model_info.get("embedding_dimension", 384)
+            logger.info(f"📊 Модель эмбеддингов имеет размерность: {embedding_dimension}")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось получить размерность модели: {e}")
+            embedding_dimension = 384  # значение по умолчанию
+        
         # Единая коллекция для всех документов
-        self.collection = self.client.get_or_create_collection(
-            name="rag_documents",
-            metadata={"description": "RAG система документов"},
-            embedding_function=None  # Используем свои эмбеддинги
-        )
+        try:
+            # Пробуем получить существующую коллекцию
+            self.collection = self.client.get_collection(name="rag_documents")
+            existing_dimension = self.collection.metadata.get("embedding_dimension", "384")
+            
+            # Конвертируем в int
+            try:
+                existing_dimension_int = int(existing_dimension)
+            except:
+                existing_dimension_int = 384
+            
+            # Проверяем совместимость
+            if existing_dimension_int != embedding_dimension:
+                logger.error(f"❌ Конфликт размерностей: коллекция имеет {existing_dimension_int}, модель генерирует {embedding_dimension}")
+                logger.error("❌ Удалите директорию data/chroma_db и перезапустите приложение")
+                raise ValueError(f"Размерность коллекции ({existing_dimension_int}) не совпадает с моделью ({embedding_dimension})")
+                
+            logger.info(f"✅ Используем существующую коллекцию с размерностью {existing_dimension_int}")
+            
+        except Exception as e:
+            # Коллекция не существует или ошибка, создаем новую
+            logger.info(f"📊 Создаем новую коллекцию с размерностью: {embedding_dimension}")
+            
+            # Для старых версий ChromaDB: dimension указывается только в metadata
+            self.collection = self.client.create_collection(
+                name="rag_documents",
+                metadata={
+                    "description": "RAG система документов",
+                    "embedding_dimension": str(embedding_dimension),
+                    "hnsw:space": "cosine"
+                }
+            )
+            logger.info(f"✅ Новая коллекция создана с размерностью {embedding_dimension}")
         
         logger.info("✅ Векторная БД инициализирована")
     
@@ -49,16 +86,38 @@ class VectorDatabase:
     async def create_collection_if_not_exists(self, collection_name: str = "rag_documents"):
         """Создать коллекцию если не существует"""
         try:
-            self.client.get_collection(name=collection_name)
+            existing_collection = self.client.get_collection(name=collection_name)
             logger.info(f"✅ Коллекция {collection_name} уже существует")
-        except Exception:
-            # Создаем новую коллекцию
-            self.client.create_collection(
+            
+            # Проверяем совместимость размерностей
+            existing_dimension = existing_collection.metadata.get("embedding_dimension", "384")
+            try:
+                existing_dimension_int = int(existing_dimension)
+            except:
+                existing_dimension_int = 384
+                
+            model_info = self.embedding_model.get_model_info()
+            model_dimension = model_info.get("embedding_dimension", 384)
+            
+            if existing_dimension_int != model_dimension:
+                logger.error(f"❌ Конфликт размерностей: коллекция={existing_dimension_int}, модель={model_dimension}")
+                raise ValueError(f"Размерность коллекции ({existing_dimension_int}) не совпадает с моделью ({model_dimension})")
+                
+        except Exception as e:
+            # Получаем размерность из модели
+            model_info = self.embedding_model.get_model_info()
+            embedding_dimension = model_info.get("embedding_dimension", 384)
+            
+            # Создаем новую коллекцию с указанием размерности в metadata
+            self.collection = self.client.create_collection(
                 name=collection_name,
-                metadata={"description": "Document chunks for RAG system"},
-                embedding_function=None
+                metadata={
+                    "description": "Document chunks for RAG system",
+                    "embedding_dimension": str(embedding_dimension),
+                    "hnsw:space": "cosine"
+                }
             )
-            logger.info(f"✅ Создана новая коллекция: {collection_name}")
+            logger.info(f"✅ Создана новая коллекция: {collection_name} (dimension={embedding_dimension})")
 
     async def index_document(self, chunks: List[Dict], document_id: str, document_name: str) -> str:
         """Индексация документа с внешними эмбеддингами"""
@@ -66,8 +125,11 @@ class VectorDatabase:
             if not chunks:
                 raise ValueError("Нет чанков для индексации")
             
-            # Убедимся, что коллекция существует
+            # Убедимся, что коллекция существует и совместима
             await self.create_collection_if_not_exists()
+            
+            # Перезагружаем коллекцию
+            self.collection = self.client.get_collection(name="rag_documents")
             
             # Подготавливаем данные
             texts = []
@@ -97,6 +159,20 @@ class VectorDatabase:
             logger.info(f"🔢 Генерация эмбеддингов для {len(texts)} чанков...")
             embeddings = self.embedding_model.encode(texts)
             
+            # Проверяем размерность первого эмбеддинга
+            if embeddings and len(embeddings) > 0:
+                actual_dimension = len(embeddings[0])
+                expected_dimension_str = self.collection.metadata.get("embedding_dimension", "384")
+                try:
+                    expected_dimension = int(expected_dimension_str)
+                except:
+                    expected_dimension = 384
+                
+                if actual_dimension != expected_dimension:
+                    error_msg = f"❌ Размерность эмбеддингов ({actual_dimension}) не совпадает с коллекцией ({expected_dimension})"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+            
             # Добавляем в коллекцию
             self.collection.add(
                 embeddings=embeddings,
@@ -117,7 +193,7 @@ class VectorDatabase:
         query: str, 
         document_id: Optional[str] = None,
         n_results: int = 5,
-        score_threshold: float = 0.3  # УМЕНЬШАЕМ порог
+        score_threshold: float = 0.3
     ) -> List[Dict]:
         """Улучшенный поиск с фильтрацией по релевантности"""
         try:
@@ -126,16 +202,19 @@ class VectorDatabase:
                 logger.warning("⚠️ Коллекция не существует, поиск невозможен")
                 return []
             
+            # Перезагружаем коллекцию
+            self.collection = self.client.get_collection(name="rag_documents")
+            
             # Генерируем эмбеддинг запроса
             query_embedding = self.embedding_model.encode([query])[0]
             
             # Фильтр по документу если указан
             where_filter = {"document_id": document_id} if document_id else None
             
-            # Выполняем поиск - УВЕЛИЧИВАЕМ количество результатов
+            # Выполняем поиск - берем больше результатов для фильтрации
             results = self.collection.query(
                 query_embeddings=[query_embedding],
-                n_results=min(n_results * 3, 20),  # Берем больше для фильтрации
+                n_results=min(n_results * 3, 20),
                 where=where_filter,
                 include=["metadatas", "documents", "distances"]
             )
@@ -147,7 +226,6 @@ class VectorDatabase:
                     distance = results["distances"][0][i]
                     similarity = 1 - distance  # Конвертируем расстояние в схожесть
                     
-                    # СНИЖАЕМ порог схожести и добавляем ВСЕ результаты для анализа
                     if similarity >= score_threshold:
                         chunks.append({
                             "text": results["documents"][0][i],
@@ -155,18 +233,13 @@ class VectorDatabase:
                             "score": similarity,
                             "distance": distance
                         })
-                    else:
-                        # Логируем чанки с низкой релевантностью для отладки
-                        logger.debug(f"🔍 Чанк с низкой релевантностью: {similarity:.3f}")
             
-            # СОРТИРУЕМ по релевантности
+            # Сортируем по релевантности
             chunks.sort(key=lambda x: x["score"], reverse=True)
             
             # Логируем информацию о найденных чанках
             if chunks:
                 logger.info(f"🎯 Найдено {len(chunks)} чанков с score >= {score_threshold}")
-                for i, chunk in enumerate(chunks[:3]):  # Показываем топ-3
-                    logger.info(f"   Топ-{i+1}: score={chunk['score']:.3f}, words={len(chunk['text'].split())}")
             else:
                 logger.warning(f"⚠️ Не найдено чанков с score >= {score_threshold}")
                 
@@ -209,6 +282,9 @@ class VectorDatabase:
             if not await self.collection_exists():
                 logger.warning(f"⚠️ Коллекция не существует, удаление {document_id} пропущено")
                 return
+            
+            # Перезагружаем коллекцию
+            self.collection = self.client.get_collection(name="rag_documents")
                 
             self.collection.delete(where={"document_id": document_id})
             logger.info(f"✅ Документ {document_id} удален из векторной БД")
@@ -221,6 +297,9 @@ class VectorDatabase:
         try:
             if not await self.collection_exists():
                 return {"document_id": document_id, "chunks_count": 0, "status": "collection_not_exists"}
+            
+            # Перезагружаем коллекцию
+            self.collection = self.client.get_collection(name="rag_documents")
                 
             results = self.collection.get(where={"document_id": document_id})
             return {
@@ -237,6 +316,9 @@ class VectorDatabase:
         try:
             if not await self.collection_exists():
                 return {"total_chunks": 0, "estimated_documents": 0, "collection_name": "rag_documents", "status": "not_exists"}
+            
+            # Перезагружаем коллекцию
+            self.collection = self.client.get_collection(name="rag_documents")
                 
             count = self.collection.count()
             
@@ -262,11 +344,11 @@ class VectorDatabase:
     async def get_document_chunks_count(self, document_id: str) -> int:
         """Получить количество чанков документа в векторной БД"""
         try:
-            # ИСПРАВЛЕНИЕ: используем правильное имя коллекции "rag_documents"
+            # Используем правильное имя коллекции "rag_documents"
             if not await self.collection_exists():
                 logger.warning(f"⚠️ Коллекция не существует для документа {document_id}")
                 return 0
-                
+            
             # Получаем коллекцию
             collection = self.client.get_collection(name="rag_documents")
             
@@ -298,6 +380,9 @@ class VectorDatabase:
         try:
             if not await self.collection_exists():
                 return []
+            
+            # Перезагружаем коллекцию
+            self.collection = self.client.get_collection(name="rag_documents")
                 
             results = self.collection.get()
             document_ids = set()
@@ -343,3 +428,114 @@ class VectorDatabase:
             
         except Exception as e:
             logger.error(f"❌ Ошибка тестирования эмбеддингов: {e}")
+
+    async def check_collection_compatibility(self) -> bool:
+        """Проверить совместимость коллекции с текущей моделью эмбеддингов"""
+        try:
+            if not await self.collection_exists():
+                return True  # Нет коллекции - можно создавать
+            
+            collection = self.client.get_collection(name="rag_documents")
+            collection_dimension_str = collection.metadata.get("embedding_dimension", "384")
+            try:
+                collection_dimension = int(collection_dimension_str)
+            except:
+                collection_dimension = 384
+            
+            model_info = self.embedding_model.get_model_info()
+            model_dimension = model_info.get("embedding_dimension", 384)
+            
+            if collection_dimension != model_dimension:
+                logger.error(f"❌ Несовместимость размерностей: коллекция={collection_dimension}, модель={model_dimension}")
+                return False
+            
+            logger.info(f"✅ Коллекция совместима с моделью (размерность={collection_dimension})")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки совместимости: {e}")
+            return False
+
+    async def get_collection_dimension(self) -> int:
+        """Получить размерность текущей коллекции"""
+        try:
+            if not await self.collection_exists():
+                return 384  # Значение по умолчанию
+            
+            collection = self.client.get_collection(name="rag_documents")
+            dimension_str = collection.metadata.get("embedding_dimension", "384")
+            try:
+                return int(dimension_str)
+            except:
+                return 384
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения размерности коллекции: {e}")
+            return 384
+    
+    async def get_collection_info(self) -> Dict[str, Any]:
+        """Получить полную информацию о коллекции"""
+        try:
+            if not await self.collection_exists():
+                return {
+                    "exists": False,
+                    "name": "rag_documents",
+                    "message": "Коллекция не существует"
+                }
+            
+            collection = self.client.get_collection(name="rag_documents")
+            
+            return {
+                "exists": True,
+                "name": collection.name,
+                "metadata": collection.metadata,
+                "count": collection.count(),
+                "dimension": await self.get_collection_dimension()
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения информации о коллекции: {e}")
+            return {
+                "exists": False,
+                "name": "rag_documents",
+                "error": str(e)
+            }
+
+    async def health_check(self) -> Dict[str, Any]:
+        """Проверка здоровья векторной БД"""
+        try:
+            collection_exists = await self.collection_exists()
+            if not collection_exists:
+                return {
+                    "status": "healthy",
+                    "collection_exists": False,
+                    "message": "Коллекция не существует, но это нормально при первом запуске"
+                }
+            
+            # Проверяем совместимость
+            compatibility = await self.check_collection_compatibility()
+            
+            if not compatibility:
+                return {
+                    "status": "unhealthy",
+                    "collection_exists": True,
+                    "message": "Несовместимость размерностей коллекции и модели"
+                }
+            
+            # Получаем базовую статистику
+            stats = await self.get_collection_stats()
+            
+            return {
+                "status": "healthy",
+                "collection_exists": True,
+                "compatible": compatibility,
+                "stats": stats,
+                "dimension": await self.get_collection_dimension()
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки здоровья БД: {e}")
+            return {
+                "status": "unhealthy",
+                "error": str(e)
+            }

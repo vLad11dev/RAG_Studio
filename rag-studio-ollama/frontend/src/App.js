@@ -7,7 +7,7 @@ import UploadZone from './components/UploadZone';
 import DocumentTable from './components/DocumentTable';
 import Chat from './components/Chat';
 import Login from './components/Login';
-import { getHealth, getModels, uploadDocument, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments, getStoredUser, removeAuthToken, api } from './services/api';
+import { getModels, uploadDocument, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments, getStoredUser, removeAuthToken, api } from './services/api';
 const CustomSelect = ({ value, onChange, options, placeholder = "Выберите...", className = "" }) => {
     const [isOpen, setIsOpen] = useState(false);
     const selectRef = useRef(null);
@@ -115,18 +115,17 @@ function App() {
         }
         const init = async () => {
             try {
-                // Используем публичный health check если есть, иначе обычный
-                try {
-                    const healthRes = await api.get('/public/health');
-                    const health = healthRes.data;
-                    setOllamaStatus(health.ollama_status);
+                // ВСЕГДА используем публичный health check для статуса Ollama
+                const healthRes = await api.get('/public/health');
+                const health = healthRes.data;
+                // Устанавливаем статус Ollama
+                if (health.ollama_status === 'connected') {
+                    setOllamaStatus('connected');
                 }
-                catch {
-                    // Если публичного нет, используем защищенный
-                    const healthRes = await getHealth();
-                    const health = healthRes.data;
-                    setOllamaStatus(health.ollama_status);
+                else {
+                    setOllamaStatus('disconnected');
                 }
+                // Загружаем модели ОТДЕЛЬНО через защищенный эндпоинт
                 const modelsRes = await getModels();
                 const modelList = modelsRes.data.models;
                 setModels(modelList);
@@ -135,8 +134,24 @@ function App() {
                 toast.success('Система готова к работе');
             }
             catch (err) {
-                setOllamaStatus('error');
                 console.error('Initialization error', err);
+                setOllamaStatus('error');
+                // Используем данные из публичного health как fallback
+                try {
+                    const publicHealthRes = await fetch('/api/public/health');
+                    if (publicHealthRes.ok) {
+                        const publicHealth = await publicHealthRes.json();
+                        setModels(publicHealth.models_available || ['llama3:8b']);
+                        setSelectedModel('llama3:8b');
+                        setOllamaStatus(publicHealth.ollama_status || 'connected');
+                    }
+                }
+                catch (fallbackErr) {
+                    // Ultimate fallback
+                    setModels(['llama3:8b']);
+                    setSelectedModel('llama3:8b');
+                    setOllamaStatus('mock:ready');
+                }
                 toast.error('Ошибка подключения к серверу');
             }
         };
