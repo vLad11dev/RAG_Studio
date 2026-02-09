@@ -885,125 +885,100 @@ async def ask_question(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Задать вопрос RAG системе"""
     start_time = datetime.utcnow()
+
+    if rag_chain is None or vector_db is None:
+        raise HTTPException(500, "RAG components not initialized")
+
     try:
-        if rag_chain is None or vector_db is None:
-            raise HTTPException(status_code=500, detail="RAG components not initialized")
-        
+        # ---------- resolve collection ----------
         collection_id = request.collection_id
+
         if not collection_id:
-            default_collection = db.query(Collection).filter(
+            collection = db.query(Collection).filter(
                 Collection.user_id == current_user.id
             ).first()
-            
-            if not default_collection:
-                raise HTTPException(status_code=400, detail="У пользователя нет коллекций")
-            
-            collection_id = default_collection.id
-        
-        collection = db.query(Collection).filter(
-            Collection.id == collection_id,
-            Collection.user_id == current_user.id
-        ).first()
-        
+            if not collection:
+                raise HTTPException(400, "У пользователя нет коллекций")
+        else:
+            collection = db.query(Collection).filter(
+                Collection.id == collection_id,
+                Collection.user_id == current_user.id
+            ).first()
+
         if not collection:
-            raise HTTPException(status_code=404, detail="Коллекция не найдена")
-        
-        collection_docs = [doc.document_id for doc in collection.documents if doc.status == "processed"]
-        
-        if not collection_docs:
-            raise HTTPException(status_code=400, detail="В коллекции нет обработанных документов")
-        
-        logger.info(f"🔍 Поиск в {len(collection_docs)} документах коллекции {collection_id}")
-        
-        # АДАПТИВНЫЙ ПОИСК
-        total_chunks_in_collection = 0
-        valid_docs = []
-        
-        # Проверяем каждый документ на наличие чанков
-        for doc_id in collection_docs:
-            doc_chunks = await vector_db.get_document_chunks_count(doc_id)
-            logger.info(f"📊 Документ {doc_id}: {doc_chunks} чанков")
-            
-            if doc_chunks > 0:
-                total_chunks_in_collection += doc_chunks
-                valid_docs.append(doc_id)
-        
-        logger.info(f"📈 Всего чанков в коллекции: {total_chunks_in_collection}")
-        
-        # Если нет чанков, возвращаем ошибку
-        if total_chunks_in_collection == 0:
-            logger.warning("⚠️ В коллекции нет чанков для поиска")
+            raise HTTPException(404, "Коллекция не найдена")
+
+        collection_id = collection.id
+
+        # ---------- documents ----------
+        doc_ids = [
+            d.document_id
+            for d in collection.documents
+            if d.status == "processed"
+        ]
+
+        if not doc_ids:
+            raise HTTPException(400, "Нет обработанных документов")
+
+        logger.info("RAG_SEARCH_START",
+            extra={"collection": collection_id, "docs": len(doc_ids)}
+        )
+
+        # ---------- retrieval params ----------
+        question_len = len(request.question)
+
+        if question_len < 40:
+            k = 6
+        elif question_len < 120:
+            k = 8
+        else:
+            k = 10
+
+        score_threshold = 0.25
+
+        # ---------- single vector search (BEST PRACTICE) ----------
+        retrieval_start = datetime.utcnow()
+
+        chunks = await vector_db.search(
+            query=request.question,
+            n_results=k,
+            score_threshold=score_threshold,
+            filters={
+                "document_id": {"$in": doc_ids}
+            }
+        )
+
+        retrieval_ms = int(
+            (datetime.utcnow() - retrieval_start).total_seconds() * 1000
+        )
+
+        if not chunks:
+            logger.info("RAG_EMPTY_RETRIEVAL",
+                extra={"collection": collection_id}
+            )
             return AskQuestionResponse(
-                answer="В коллекции нет индексированных данных для поиска. Пожалуйста, переиндексируйте документы.",
+                answer="Не найден релевантный контекст. Уточните вопрос.",
                 sources=[],
                 collection_id=collection_id,
-                processing_time=0
+                processing_time=retrieval_ms
             )
-        
-        # УМНОЕ ВЫБОР n_results и score_threshold
-        if total_chunks_in_collection <= 10:
-            n_results = min(8, total_chunks_in_collection)  # Используем больше чанков
-            score_threshold = 0.2  # ОЧЕНЬ НИЗКИЙ порог для маленьких коллекций
-            logger.info(f"🎯 Мало чанков: n_results={n_results}, score_threshold={score_threshold}")
-        else:
-            n_results = 6
-            score_threshold = 0.3  # Нормальный порог
-            logger.info(f"🎯 Нормальное количество чанков: n_results={n_results}, score_threshold={score_threshold}")
-        
-        # ИСПОЛЬЗУЕМ УЛУЧШЕННЫЙ ПОИСК
-        all_relevant_chunks = []
-        for doc_id in valid_docs:
-            try:
-                chunks = await vector_db.search(
-                    query=request.question,
-                    document_id=doc_id,
-                    n_results=n_results,
-                    score_threshold=score_threshold
-                )
-                all_relevant_chunks.extend(chunks)
-                logger.info(f"📄 В документе {doc_id} найдено {len(chunks)} релевантных чанков")
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка поиска в документе {doc_id}: {e}")
-                continue
-        
-        # Сортируем все результаты по релевантности
-        all_relevant_chunks.sort(key=lambda x: x["score"], reverse=True)
-        
-        # Берем топ чанки - УВЕЛИЧИВАЕМ количество для контекста
-        if all_relevant_chunks:
-            # Используем больше чанков для лучшего контекста
-            top_chunks = all_relevant_chunks[:min(8, len(all_relevant_chunks))]
-            logger.info(f"✅ Найдено {len(top_chunks)} релевантных чанков, лучший score: {top_chunks[0]['score']:.3f}")
-            
-            # Детальное логирование чанков
-            logger.info("📋 Топ чанки:")
-            for i, chunk in enumerate(top_chunks):
-                score = chunk.get("score", 0)
-                doc_name = chunk.get("metadata", {}).get("document_name", "Unknown")
-                text_preview = chunk["text"][:100] + "..." if len(chunk["text"]) > 100 else chunk["text"]
-                logger.info(f"   {i+1}. Score: {score:.3f}, Док: {doc_name}")
-                logger.info(f"      Текст: {text_preview}")
-        else:
-            top_chunks = []
-            logger.warning(f"❌ Не найдено релевантных чанков для вопроса: '{request.question}'")
-            
-            # Дополнительная диагностика
-            logger.info("🔍 Диагностика поиска:")
-            logger.info(f"   Коллекция: {collection_id}, документов: {len(valid_docs)}")
-            logger.info(f"   Всего чанков: {total_chunks_in_collection}")
-            logger.info(f"   Параметры: n_results={n_results}, score_threshold={score_threshold}")
-        
-        if not top_chunks:
-            return AskQuestionResponse(
-                answer="В текущих документах не найдено информации для ответа на этот вопрос. Попробуйте переформулировать запрос или добавьте больше документов в коллекцию.",
-                sources=[],
-                collection_id=collection_id,
-                processing_time=0
-            )
-        
-        # Генерируем ответ
+
+        # ---------- sort ----------
+        chunks.sort(key=lambda x: x["score"], reverse=True)
+        top_chunks = chunks[:k]
+
+        logger.info("RAG_RETRIEVAL_DONE",
+            extra={
+                "chunks": len(top_chunks),
+                "top_score": top_chunks[0]["score"],
+                "latency_ms": retrieval_ms
+            }
+        )
+
+        # ---------- generation ----------
+        gen_start = datetime.utcnow()
+
         answer = await rag_chain.generate_answer(
             question=request.question,
             context_chunks=top_chunks,
@@ -1011,38 +986,54 @@ async def ask_question(
             max_tokens=request.max_tokens,
             model=request.model
         )
-        
-        sources = list(set([
-            chunk.get("metadata", {}).get("document_name", "Документ")
-            for chunk in top_chunks
-        ]))
-        
-        processing_time = int((datetime.utcnow() - start_time).total_seconds() * 1000)
-        
-        # Сохраняем в историю чата
-        chat_history = ChatHistory(
+
+        gen_ms = int(
+            (datetime.utcnow() - gen_start).total_seconds() * 1000
+        )
+
+        # ---------- sources ----------
+        sources = list({
+            c.get("metadata", {}).get("document_name", "Документ")
+            for c in top_chunks
+        })
+
+        total_ms = int(
+            (datetime.utcnow() - start_time).total_seconds() * 1000
+        )
+
+        # ---------- save history ----------
+        db.add(ChatHistory(
             collection_id=collection_id,
             question=request.question,
             answer=answer,
             sources=sources,
             model_used=request.model,
-            processing_time=processing_time
-        )
-        db.add(chat_history)
+            processing_time=total_ms
+        ))
         db.commit()
-        
-        logger.info(f"💬 Ответ сгенерирован, время обработки: {processing_time}ms")
-        
+
+        logger.info("RAG_DONE",
+            extra={
+                "total_ms": total_ms,
+                "retrieval_ms": retrieval_ms,
+                "generation_ms": gen_ms
+            }
+        )
+
         return AskQuestionResponse(
             answer=answer,
             sources=sources,
             collection_id=collection_id,
-            processing_time=processing_time
+            processing_time=total_ms
         )
-    
+
+    except HTTPException:
+        raise
+
     except Exception as e:
-        logger.error(f"❌ Ошибка при обработке вопроса: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка при обработке вопроса: {str(e)}")
+        logger.exception("RAG_FATAL_ERROR")
+        raise HTTPException(500, "Ошибка обработки запроса")
+
 
 @app.post("/api/debug/embedding-test")
 async def debug_embedding_test(

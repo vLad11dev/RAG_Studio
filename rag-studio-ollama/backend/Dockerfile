@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY . .
 
 # 5. Создание необходимых директорий
-RUN mkdir -p data/uploaded_files data/chroma_db
+RUN mkdir -p data/uploaded_files
 
 EXPOSE 8000
 
