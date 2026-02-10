@@ -1,21 +1,23 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { toast } from 'react-hot-toast';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import ToastProvider from './components/Toast';
 import Header from './components/Header';
 import UploadZone from './components/UploadZone';
 import DocumentTable from './components/DocumentTable';
 import Chat from './components/Chat';
 import Login from './components/Login';
-import { 
-  getHealth, 
-  getModels, 
-  uploadDocument, 
-  askCollectionQuestion, 
-  deleteDocument, 
-  getDocumentStatus, 
-  createCollection, 
-  getCollectionDocuments, 
-  getStoredUser, 
+// Админ-панель импортируется через маршрутизацию
+import {
+  getHealth,
+  getModels,
+  uploadDocument,
+  askCollectionQuestion,
+  deleteDocument,
+  getDocumentStatus,
+  createCollection,
+  getCollectionDocuments,
+  getStoredUser,
   removeAuthToken,
   api
 } from './services/api';
@@ -138,14 +140,22 @@ function App() {
 
   // Проверка аутентификации при загрузке
   useEffect(() => {
-    const checkAuth = () => {
+    const checkAuth = async () => {
       try {
         const storedUser = getStoredUser();
         const token = localStorage.getItem('auth_token') || localStorage.getItem('access_token');
-        
+
         if (storedUser && token) {
-          setCurrentUser(storedUser);
-          setIsAuthenticated(true);
+          // Проверяем права пользователя через API
+          try {
+            const response = await api.get('/api/auth/me');
+            const userData = response.data;
+            setCurrentUser(userData);
+            setIsAuthenticated(true);
+          } catch (apiError) {
+            console.error('Ошибка проверки пользователя:', apiError);
+            setIsAuthenticated(false);
+          }
         } else {
           setIsAuthenticated(false);
         }
@@ -160,10 +170,20 @@ function App() {
   }, []);
 
   // Функции для аутентификации
-  const handleLoginSuccess = React.useCallback((user: any) => {
-    setCurrentUser(user);
-    setIsAuthenticated(true);
-    toast.success(`Добро пожаловать, ${user.username}!`);
+  const handleLoginSuccess = React.useCallback(async (user: any) => {
+    // Получаем полную информацию о пользователе
+    try {
+      const response = await api.get('/api/auth/me');
+      const userData = response.data;
+      setCurrentUser(userData);
+      setIsAuthenticated(true);
+      toast.success(`Добро пожаловать, ${userData.username}!`);
+    } catch (error) {
+      console.error('Ошибка получения данных пользователя:', error);
+      setCurrentUser(user);
+      setIsAuthenticated(true);
+      toast.success(`Добро пожаловать, ${user.username}!`);
+    }
   }, []);
 
   const handleLogout = React.useCallback(() => {
@@ -691,7 +711,6 @@ function App() {
     );
   }
 
-  // Основной интерфейс приложения
   return (
     <div className="min-h-screen bg-gray-50">
       <Header currentUser={currentUser} onLogout={handleLogout} />
@@ -841,7 +860,7 @@ function App() {
         {activeTab === 'docs' ? (
           <div className="space-y-6 animate-in fade-in duration-300">
             <UploadZone onUpload={handleUpload} />
-            
+
             {filteredDocuments.length > 0 && (
               <DocumentTable
                 documents={filteredDocuments}

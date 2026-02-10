@@ -7,6 +7,7 @@ import UploadZone from './components/UploadZone';
 import DocumentTable from './components/DocumentTable';
 import Chat from './components/Chat';
 import Login from './components/Login';
+// Админ-панель импортируется через маршрутизацию
 import { getModels, uploadDocument, askCollectionQuestion, deleteDocument, getDocumentStatus, createCollection, getCollectionDocuments, getStoredUser, removeAuthToken, api } from './services/api';
 const CustomSelect = ({ value, onChange, options, placeholder = "Выберите...", className = "" }) => {
     const [isOpen, setIsOpen] = useState(false);
@@ -57,13 +58,22 @@ function App() {
     const activeCollection = collections.find(c => c.id === activeCollectionId);
     // Проверка аутентификации при загрузке
     useEffect(() => {
-        const checkAuth = () => {
+        const checkAuth = async () => {
             try {
                 const storedUser = getStoredUser();
                 const token = localStorage.getItem('auth_token') || localStorage.getItem('access_token');
                 if (storedUser && token) {
-                    setCurrentUser(storedUser);
-                    setIsAuthenticated(true);
+                    // Проверяем права пользователя через API
+                    try {
+                        const response = await api.get('/api/auth/me');
+                        const userData = response.data;
+                        setCurrentUser(userData);
+                        setIsAuthenticated(true);
+                    }
+                    catch (apiError) {
+                        console.error('Ошибка проверки пользователя:', apiError);
+                        setIsAuthenticated(false);
+                    }
                 }
                 else {
                     setIsAuthenticated(false);
@@ -79,10 +89,21 @@ function App() {
         checkAuth();
     }, []);
     // Функции для аутентификации
-    const handleLoginSuccess = React.useCallback((user) => {
-        setCurrentUser(user);
-        setIsAuthenticated(true);
-        toast.success(`Добро пожаловать, ${user.username}!`);
+    const handleLoginSuccess = React.useCallback(async (user) => {
+        // Получаем полную информацию о пользователе
+        try {
+            const response = await api.get('/api/auth/me');
+            const userData = response.data;
+            setCurrentUser(userData);
+            setIsAuthenticated(true);
+            toast.success(`Добро пожаловать, ${userData.username}!`);
+        }
+        catch (error) {
+            console.error('Ошибка получения данных пользователя:', error);
+            setCurrentUser(user);
+            setIsAuthenticated(true);
+            toast.success(`Добро пожаловать, ${user.username}!`);
+        }
     }, []);
     const handleLogout = React.useCallback(() => {
         removeAuthToken();
@@ -530,7 +551,6 @@ function App() {
     if (!isAuthenticated) {
         return (_jsxs("div", { className: "min-h-screen bg-gray-50", children: [_jsx(ToastProvider, {}), _jsx(Login, { onLoginSuccess: handleLoginSuccess })] }));
     }
-    // Основной интерфейс приложения
     return (_jsxs("div", { className: "min-h-screen bg-gray-50", children: [_jsx(Header, { currentUser: currentUser, onLogout: handleLogout }), _jsx(ToastProvider, {}), _jsxs("main", { className: "max-w-7xl mx-auto px-4 py-6", children: [_jsxs("div", { className: "mb-6 p-4 bg-white rounded-lg shadow-sm border transition-all duration-300 hover:shadow-md", children: [_jsxs("div", { className: "flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4", children: [_jsxs("div", { className: "flex items-center gap-4", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "font-medium", children: "Ollama:" }), (ollamaStatus === 'connected' || ollamaStatus === 'mock:ready') ? (_jsx("span", { className: "text-green-600 animate-pulse", children: "\u2705 \u041F\u043E\u0434\u043A\u043B\u044E\u0447\u0451\u043D" })) : ollamaStatus === 'checking...' ? (_jsx("span", { className: "text-gray-500 animate-pulse", children: "\u041F\u0440\u043E\u0432\u0435\u0440\u043A\u0430..." })) : (_jsx("span", { className: "text-red-600", children: "\u274C \u041D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D" }))] }), models.length > 0 && (_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("label", { className: "text-sm text-gray-600", children: "\u041C\u043E\u0434\u0435\u043B\u044C:" }), _jsx(CustomSelect, { value: selectedModel, onChange: setSelectedModel, options: models.map(model => ({ value: model, label: model })) })] }))] }), _jsxs("div", { className: "flex items-center gap-3", children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("span", { className: "text-sm text-gray-600", children: "\u041A\u043E\u043B\u043B\u0435\u043A\u0446\u0438\u044F:" }), _jsx(CustomSelect, { value: activeCollectionId || '', onChange: setActiveCollectionId, options: collections.map(c => ({
                                                             value: c.id,
                                                             label: `${c.name} (${c.docIds.length} док.)`

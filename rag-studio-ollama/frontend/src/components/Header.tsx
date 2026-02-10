@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface HeaderProps {
   currentUser?: any;
@@ -6,6 +7,12 @@ interface HeaderProps {
 }
 
 const Header: React.FC<HeaderProps> = ({ currentUser, onLogout }) => {
+  const navigate = useNavigate();
+
+  const goToAdmin = () => {
+    navigate('/admin');
+  };
+
   return (
     <header className="bg-white shadow-sm border-b">
       <div className="max-w-7xl mx-auto px-4 py-4 flex justify-between items-center">
@@ -17,15 +24,26 @@ const Header: React.FC<HeaderProps> = ({ currentUser, onLogout }) => {
             </span>
           )}
         </div>
-        
-        {currentUser && onLogout && (
-          <button
-            onClick={onLogout}
-            className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-          >
-            Выйти
-          </button>
-        )}
+
+        <div className="flex items-center gap-3">
+          {currentUser?.role === 'admin' && (
+            <button
+              onClick={goToAdmin}
+              className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+            >
+              Админ-панель
+            </button>
+          )}
+          
+          {currentUser && onLogout && (
+            <button
+              onClick={onLogout}
+              className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+            >
+              Выйти
+            </button>
+          )}
+        </div>
       </div>
     </header>
   );

@@ -16,6 +16,8 @@
   },
   "include": [
     "src",
-    "vite.config.js"
+    "vite.config.js",
+    "src/jsx.d.ts",
+    "src/types/admin-panel.d.ts"
   ]
 }

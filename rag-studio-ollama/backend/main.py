@@ -64,6 +64,7 @@ class UserResponse(BaseModel):
     email: str
     full_name: Optional[str]
     is_active: bool
+    role: Optional[str] = "user"  # Добавляем поле роли
     created_at: datetime
 
 class UserLogin(BaseModel):
@@ -218,7 +219,8 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
             username=user_data.username,
             email=user_data.email,
             hashed_password=hashed_password,
-            full_name=user_data.full_name
+            full_name=user_data.full_name,
+            role='user'  # Устанавливаем роль по умолчанию
         )
         
         db.add(user)
@@ -298,6 +300,7 @@ async def login(login_data: UserLogin, db: Session = Depends(get_db)):
         email=user.email,
         full_name=user.full_name,
         is_active=user.is_active,
+        role=getattr(user, 'role', 'user'),  # Включаем роль пользователя
         created_at=user.created_at
     )
     
@@ -317,6 +320,7 @@ async def get_current_user_info(current_user: User = Depends(get_current_active_
         email=current_user.email,
         full_name=current_user.full_name,
         is_active=current_user.is_active,
+        role=getattr(current_user, 'role', 'user'),  # Возвращаем роль пользователя
         created_at=current_user.created_at
     )
 

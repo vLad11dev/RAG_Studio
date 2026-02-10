@@ -22,6 +22,9 @@ COPY . .
 # 5. Создание необходимых директорий
 RUN mkdir -p data/uploaded_files
 
+# Копируем скрипт инициализации
+COPY init_admin.py /app/init_admin.py
+
 EXPOSE 8000
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
